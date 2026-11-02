@@ -2463,6 +2463,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             return
         }
         resumeInstagramNotificationShade(root)
+        if (refreshFocusedInstagramSearch(root, scanNow)) return
         if (precoverCollectionReturn(root)) return
         val notificationTransitionActive = lastInstagramScreen == InstagramScreen.NOTIFICATIONS ||
             instagramExitFromNotifications || instagramNotificationReturn.isPending(scanNow) ||
@@ -3254,6 +3255,47 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
      * Clamp the curtain's bottom edge to the visible tab bar top (or the last
      * verified curtain bottom) so a precover never covers the bottom menu.
      */
+    /**
+     * Explore's editor can be focused while its old feed nodes remain mounted.
+     * Waiting for all absent viewer/profile probes and the general snapshot
+     * kept the curtain over the keyboard's search destination for ~1 s. Prove
+     * the current input target directly, before those unrelated traversals.
+     * Closed-keyboard results and all other editors retain normal detection.
+     */
+    private fun refreshFocusedInstagramSearch(root: AccessibilityNodeInfo, now: Long): Boolean {
+        if (lastInstagramScreen != InstagramScreen.EXPLORE &&
+            lastInstagramScreen != InstagramScreen.SEARCH_RESULTS) return false
+        if (instagramExitInProgress || instagramProfileIngress.pending ||
+            instagramProfileIngress.awaitingCurtainDraw ||
+            instagramProtectedNavigation.isAwaitingDispatch(now)) return false
+        val editor = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        if (editor.windowId != root.windowId || !editor.isVisibleToUser ||
+            editor.viewIdResourceName != "$INSTAGRAM_PACKAGE:id/action_bar_search_edit_text" ||
+            !InstagramSurfacePolicy.isFocusedSearchField("action_bar_search_edit_text",
+                editor.className?.toString().orEmpty(), editor.isFocused) ||
+            !isInputMethodVisible()) return false
+
+        val released = instagramOverlay.visibleCurtain() != null ||
+            lastInstagramScreen != InstagramScreen.SEARCH_RESULTS
+        currentInstagramWindowId = root.windowId
+        instagramExploreSearchSeen = true
+        clearDirectConversationEntryGuard()
+        hideInstagramContentOverlay()
+        // Feed proxies must not remain over the native search/keyboard surface.
+        instagramOverlay.updateNavigationGuards(emptyMap())
+        instagramOverlay.updateEntryGuards(emptyList(), isEnglish())
+        observeInstagramScreen(InstagramScreen.SEARCH_RESULTS, root.windowId)
+        refreshMainReelsTabGuard(root)
+        val back = cachedNodeLookup(root, "$INSTAGRAM_PACKAGE:id/action_bar_button_back")
+            .firstOrNull { it.isVisibleToUser }
+            ?.let { Rect().also(it::getBoundsInScreen) }?.takeUnless(Rect::isEmpty)
+        instagramOverlay.updateSearchReturnGuard(back, ::onSearchReturnBack)
+        if (instagramOverlay.hasVisibleWindows) scheduleOverlayForegroundCheck()
+        if (released && ProtectionFlightRecorder.ENABLED) ProtectionFlightRecorder.record(
+            this, "instagram.search.focus", "released=true elapsedMs=${SystemClock.uptimeMillis() - now}")
+        return true
+    }
+
     private fun keywordResultsGridBounds(root: AccessibilityNodeInfo, window: Rect): Rect? {
         val tabs = findVisibleNodeBounds(root, "$INSTAGRAM_PACKAGE:id/search_tab_bar_layout")
             ?: return null
