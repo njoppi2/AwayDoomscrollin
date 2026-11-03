@@ -1426,6 +1426,12 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
 
         val reportedPackage = event.packageName?.toString()
         if (reportedPackage != null && reportedPackage != INSTAGRAM_PACKAGE &&
+            reportedPackage != this.packageName && homeStoriesTarget.get() != null) {
+            // Drop queued forwarding before any foreground/window IPC. A shade
+            // or another app may still leave the Instagram root mounted below it.
+            clearHomeStoriesGuard()
+        }
+        if (reportedPackage != null && reportedPackage != INSTAGRAM_PACKAGE &&
             reportedPackage != this.packageName && searchObservationActive) {
             // An IME/system window event is not proof of app departure. Drop
             // older reads now; normal foreground routing or the worker's final

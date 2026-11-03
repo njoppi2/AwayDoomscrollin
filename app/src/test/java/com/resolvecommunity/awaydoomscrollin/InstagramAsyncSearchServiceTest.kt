@@ -262,4 +262,14 @@ class InstagramAsyncSearchServiceTest {
             .apply { isAccessible = true }.getBoolean(service))
     }
 
+    @Test fun aSystemWindowEventCancelsReplayEvenWithHomeStillMountedUnderneath() {
+        val (stories, _) = prepareHomeReplay()
+        queueHomeReplay(stories)
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_WINDOWS_CHANGED).apply {
+            packageName = "com.android.systemui"
+        })
+        runHomeWorker()
+        assertEquals(0, serviceShadow.dispatched)
+    }
+
 }
