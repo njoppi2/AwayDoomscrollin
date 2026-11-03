@@ -35,7 +35,7 @@ detection or cause missed or incorrect detections.
 
 ## Home touch option and responsiveness
 
-Balanced Instagram can optionally lock upward drags starting in the uncovered Home area below the fixed toolbar, including the blank gap during refresh. Story taps, horizontal swipes and downward pulls for refresh are replayed after finger-up; refresh starts below the fixed toolbar, and its touch area stays steady through layout changes; the replay can feel slower, and its brief forwarding interval is not a guarantee against every rapid gesture. This option is off by default in release builds and on by default in the separate development test build. It does not intercept messages or recording controls, add permissions or transmit gesture data. Supported Balanced Home and Explore/search layouts use a serial background reader with bounded, conflated work; unknown or unsupported layouts retain protection and return to the existing detector.
+Balanced Instagram can optionally block vertical drags in both directions in the uncovered Home area below the fixed toolbar. Pull-to-refresh is also blocked. Story taps and horizontal swipes are replayed after finger-up; replay can feel slower, and its brief forwarding interval is not a guarantee against every rapid gesture. This option is off by default in release builds and on by default in the separate development test build. It does not intercept messages or recording controls, add permissions or transmit gesture data. Supported Balanced Home and Explore/search layouts use a serial background reader with bounded, conflated work; unknown or unsupported layouts retain protection and return to the existing detector.
 
 ## What it covers
 

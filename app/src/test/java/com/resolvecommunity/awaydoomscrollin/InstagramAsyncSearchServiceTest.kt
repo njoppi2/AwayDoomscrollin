@@ -208,7 +208,7 @@ class InstagramAsyncSearchServiceTest {
             InstagramHomeStoriesGesture.Forward::class.java).apply {
             isAccessible = true
             invoke(service, InstagramHomeStoriesGesture.Forward(50f, stories.top + 20f,
-                100f, stories.top + 20f, 150L))
+                100f, 150L))
         }
     }
     private fun runHomeWorker() {

@@ -246,7 +246,7 @@ class InstagramSearchObservationTest {
         assertEquals(InstagramSearchSurface.DEPARTED, changing.read().surface)
     }
 
-    @Test fun refreshInputBandStaysAnchoredBelowHeaderWhenTrayMovesDown() {
+    @Test fun inputBandCoversUncoveredAreaBelowHeaderWhenTrayMoves() {
         home()
         add("reels_tray_container", Rect(0, 400, 1080, 640))
         val observation = reader.read()

@@ -317,8 +317,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             clearHomeStoriesGuard()
             return
         }
-        // Native refresh moves the tray while its drag is in flight. Replacing
-        // the target here used to re-arm a moving hitbox before replay finished.
+        // Do not re-arm a touch window while an allowed tap/swipe is replaying.
         if (homeStoriesReplayPending && homeStoriesTarget.get()?.windowId == windowId) return
         val candidate = HomeStoriesTarget(windowId, stories, band)
         if (homeStoriesTarget.get() != candidate) {
@@ -348,15 +347,13 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             val verified = runCatching { searchObservationReader.value.read(::current) }.getOrNull()
             mainHandler.post ready@ {
                 if (!current()) return@ready
-                val refresh = gesture.endY > gesture.y
                 if (verified?.surface != InstagramSearchSurface.HOME || verified.windowId != target.windowId ||
-                    verified.stories == null || (!refresh && verified.stories != target.bounds)) {
+                    verified.stories == null || verified.stories != target.bounds) {
                     clearHomeStoriesGuard()
                     queueInstagramScan(0L)
                     return@ready
                 }
-                val native = gesture.forStories(verified.stories, resources.displayMetrics.heightPixels,
-                    verified.homeTouchBand?.top ?: verified.stories.top)
+                val native = gesture.forStories(verified.stories)
                 if (native == null) {
                     clearHomeStoriesGuard()
                     queueInstagramScan(0L)
@@ -365,13 +362,12 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                 val x = native.x
                 val endX = native.endX
                 val y = native.y
-                val endY = native.endY
                 val path = Path().apply {
                     moveTo(x, y)
-                    if (endX != x || endY != y) lineTo(endX, endY)
+                    if (endX != x) lineTo(endX, y)
                 }
                 // Remove this one input window to avoid injecting into ourselves.
-                // Never replay upward movement, retry a gesture, or inject
+                // Never replay vertical movement, retry a gesture, or inject
                 // while the user's original touch stream is still in progress.
                 instagramOverlay.updateHomeStoriesGuard(null)
                 fun finished() {
@@ -391,7 +387,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                     if (!current()) { finished(); return@dispatch }
                     fun result(completed: Boolean) {
                         ProtectionFlightRecorder.record(this, "instagram.home.stories-result",
-                            "completed=$completed horizontal=${endX != x} refresh=${endY > y}")
+                            "completed=$completed horizontal=${endX != x}")
                         finished()
                     }
                     val accepted = runCatching { dispatchGesture(description, object : GestureResultCallback() {
@@ -400,7 +396,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                     }, mainHandler) }.getOrDefault(false)
                     if (!accepted) finished()
                     ProtectionFlightRecorder.record(this, "instagram.home.stories-forward",
-                        "accepted=$accepted horizontal=${endX != x} refresh=${endY > y}")
+                        "accepted=$accepted horizontal=${endX != x}")
                 }, 48L)
             }
         }

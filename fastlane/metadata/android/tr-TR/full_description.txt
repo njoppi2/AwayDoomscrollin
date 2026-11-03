@@ -5,7 +5,7 @@ Koruma ve uyumluluk:
 
 Özellikler:
 • Instagram: İki modda da Ana Sayfa ve Keşfet perdelenir; Reels sekmesi engellenir. Mesajlar ve arama açık kalır. Dengeli modda profiller, profil gönderileri, hikâyeler ve öne çıkanlar açıktır; açtığınız tek bir Reel'i yorumlarıyla izleyebilirsiniz, sonraki videoya geçince geri dönülür. Sert mod ayrıca profil gönderilerini perdeler; Reels, hikâyeler ve öne çıkanları engeller. Mesaj ayrıntılarındaki paylaşılan medya galerileri de perdelenebilir.
-• İsteğe bağlı Ana Sayfa hikâye kilidi üst çubuğun altında yukarı kaydırmayı engeller; izin verilen hareketler parmak kalkınca uygulanır.
+• İsteğe bağlı Ana Sayfa hikâye kilidi dikey kaydırmayı ve yenilemeyi engeller; dokunma ve yatay kaydırmalar parmak kalkınca uygulanır.
 • YouTube: İki modda da Ana Sayfa ve Abonelikler akışları perdelenir; Shorts sekmesi engellenir. Arama sonuçları, kanallar, oynatma listeleri, You sekmesi ve uzun videolar açık kalır. Sert modda tüm Shorts engellenir. Dengeli modda arama, kanal veya bağlantıdan açtığınız tek bir Short'u izleyebilirsiniz; sonraki videoya geçince geri dönülür.
 • TikTok: TikTok'u açmak ve gezinmek serbesttir. Bir video akışında sonraki videoya ilk kaydırmada geri dönülür; Ana sayfada Sizin İçin dışındaki her üst sekme Sizin İçin'e geri döner. TikTok'ta mod seçimi yoktur.
 • Kullanıcı kontrolü: Koruma, uygulamadan veya Android erişilebilirlik ayarlarından kapatılabilir; uygulama, ayarları izlemez ve servisin kapatılmasını engellemez.

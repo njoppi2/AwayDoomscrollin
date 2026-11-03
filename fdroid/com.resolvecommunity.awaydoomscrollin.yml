@@ -14,7 +14,7 @@ AntiFeatures:
       active server snapshot expires within 90 days, and encrypted local operational
       backups use a separate 14-day rotation. Screen text and titles, including chat
       and account names, are excluded from development diagnostics and network payloads.
-      The optional Home upward-swipe lock below the toolbar processes permitted gestures locally
+      The optional Home vertical-swipe lock blocks both directions and refresh; permitted gestures are processed locally
       in memory and does not retain or upload touch paths.
 Categories:
   - System
