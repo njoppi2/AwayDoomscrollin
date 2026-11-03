@@ -10,7 +10,7 @@ internal enum class InstagramSearchSurface { HOME, INBOX, INBOX_TRANSITION, EXPL
 /** A copied event's source is fetched on the reader thread, never on the UI thread. */
 internal data class InstagramDirectTap(
     val windowId: Int,
-    val tab: InstagramGeometrySample,
+    val tab: InstagramGeometrySample?,
     val eventTime: Long,
     val source: () -> AccessibilityNodeInfo?
 )
@@ -116,9 +116,11 @@ internal class InstagramSearchObservationReader(
             var source = directTap.source()
             val sourceBounds = source?.let { Rect().also(it::getBoundsInScreen) }
             val inTab = sourceBounds != null && !sourceBounds.isEmpty &&
-                directTap.tab.rect().contains(sourceBounds.centerX(), sourceBounds.centerY()) &&
-                sourceBounds.width() <= directTap.tab.right - directTap.tab.left &&
-                sourceBounds.height() <= directTap.tab.bottom - directTap.tab.top
+                sourceBounds.centerY() > window.centerY() && sourceBounds.width() <= window.width() / 3 &&
+                sourceBounds.height() <= window.height() / 3 &&
+                (directTap.tab == null || (directTap.tab.rect().contains(sourceBounds.centerX(), sourceBounds.centerY()) &&
+                    sourceBounds.width() <= directTap.tab.right - directTap.tab.left &&
+                    sourceBounds.height() <= directTap.tab.bottom - directTap.tab.top))
             var matched = false
             if (inTab) repeat(3) {
                 checkCurrent()
@@ -130,7 +132,12 @@ internal class InstagramSearchObservationReader(
                     if (!matched) source = node.parent
                 }
             }
-            if (matched && selected("direct_tab") && visible("action_bar_button_back") == null &&
+            val nativeTab = if (matched) bounds("direct_tab") else null
+            val nativeBoundsMatch = nativeTab != null && sourceBounds != null &&
+                nativeTab.rect().contains(sourceBounds.centerX(), sourceBounds.centerY()) &&
+                sourceBounds.width() <= nativeTab.right - nativeTab.left &&
+                sourceBounds.height() <= nativeTab.bottom - nativeTab.top
+            if (matched && nativeBoundsMatch && selected("direct_tab") && visible("action_bar_button_back") == null &&
                 listOf("root_clips_layout", "reel_viewer_root", "story_viewer_container")
                     .none { visible(it) != null } && now() - directTap.eventTime in 0L..500L) {
                 return InstagramSearchObservation(InstagramSearchSurface.INBOX_TRANSITION, windowId, pkg)
@@ -158,14 +165,16 @@ internal class InstagramSearchObservationReader(
             if (list != null && header && InstagramInboxPolicy.isStableInboxLayout(list, window.sample()) &&
                 listOf("root_clips_layout", "clips_viewer", "clips_viewer_view_pager", "clips_view_pager",
                     "thread_details_pager", "story_viewer_container", "reel_item_toolbar_container",
-                    "reel_viewer_root", "reel_viewer_content_layout").none { visible(it) != null }) {
+                    "reel_viewer_root", "reel_viewer_content_layout", "direct_thread_header",
+                    "message_list", "message_composer_bar").none { visible(it) != null }) {
                 return result(InstagramSearchSurface.INBOX, inbox = list)
             }
             return InstagramSearchObservation(InstagramSearchSurface.OTHER, windowId, pkg)
         }
-        if (back == null && selected("feed_tab") && visible("main_feed_action_bar") != null) {
+        if (back == null && selected("feed_tab")) {
             if (listOf("reel_viewer_root", "story_viewer_container", "root_clips_layout",
-                    "reel_item_toolbar_container").any { visible(it) != null }) {
+                    "reel_item_toolbar_container", "profile_header_container", "direct_thread_header",
+                    "message_composer_bar").any { visible(it) != null }) {
                 return InstagramSearchObservation(InstagramSearchSurface.OTHER, windowId, pkg)
             }
             // Attached sane chrome remains measurable when our curtain occludes
@@ -182,11 +191,16 @@ internal class InstagramSearchObservationReader(
                 }
             }
             val bottom = bounds("tab_bar")?.top
-            if (header != null && stories != null && stories.top >= header.bottom &&
+            // Instagram removes its main action bar when Home scrolls. The
+            // selected tab and a sane attached Stories tray still identify Home;
+            // requiring the absent header sent every update to the UI detector.
+            val storiesTop = maxOf(stories?.top ?: window.top, header?.bottom ?: window.top)
+            if (stories != null && storiesTop < stories.bottom &&
                 bottom != null && bottom > stories.bottom && bottom > window.centerY()) {
                 return result(InstagramSearchSurface.HOME,
-                    InstagramGeometrySample(window.left, stories.bottom, window.right, bottom), stories = stories,
-                    band = InstagramGeometrySample(window.left, header.bottom, window.right, stories.bottom))
+                    InstagramGeometrySample(window.left, stories.bottom, window.right, bottom),
+                    stories = InstagramGeometrySample(stories.left, storiesTop, stories.right, stories.bottom),
+                    band = InstagramGeometrySample(window.left, header?.bottom ?: storiesTop, window.right, stories.bottom))
             }
             return InstagramSearchObservation(InstagramSearchSurface.OTHER, windowId, pkg,
                 diagnostic = "home-geometry-header-${header != null}-stories-${stories != null}-navigation-${bottom != null}")

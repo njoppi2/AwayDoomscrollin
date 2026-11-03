@@ -179,6 +179,54 @@ class InstagramAsyncSearchServiceTest {
                 .apply { isAccessible = true }.get(service))
     }
 
+    @Test fun verifiedMainInboxContentAndReturnEventsStayOffTheUiTree() {
+        apply(InstagramSearchObservation(InstagramSearchSurface.INBOX, 10, "com.instagram.android",
+            inbox = InstagramGeometrySample(0, 200, 1080, 1800)))
+        for (kind in listOf(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, AccessibilityEvent.TYPE_VIEW_CLICKED)) {
+            service.onAccessibilityEvent(AccessibilityEvent(kind).apply { packageName = "com.instagram.android" })
+        }
+        assertFalse(serviceShadow.queriedOnUi.get())
+        assertFalse(RecordShadow.queriedOnUi.get())
+    }
+
+    @Test fun settlingHomeUsesTheWorkerInsteadOfTheOldUiGeometryProbe() {
+        field("lastInstagramScreen", InstagramScreen.HOME_FEED)
+        AntiScrollService::class.java.getDeclaredField("homeScrollSettled").apply { isAccessible = true }
+            .get(service).let { (it as Runnable).run() }
+        assertFalse(serviceShadow.queriedOnUi.get())
+    }
+
+    private fun pendingHomeReturn(): InstagramProtectedNavigationLatch {
+        val latch = AntiScrollService::class.java.getDeclaredField("instagramProtectedNavigation")
+            .apply { isAccessible = true }.get(service) as InstagramProtectedNavigationLatch
+        val request = latch.begin(InstagramTab.HOME, 10, InstagramTab.DIRECT, android.os.SystemClock.uptimeMillis())
+        assertTrue(latch.markDispatched(request))
+        return latch
+    }
+
+    @Test fun aSourceInboxUpdateCannotRemoveTheCoverDuringGuardedHomeReturn() {
+        pendingHomeReturn()
+        apply(InstagramSearchObservation(InstagramSearchSurface.INBOX, 10, "com.instagram.android",
+            inbox = InstagramGeometrySample(0, 200, 1080, 1800)))
+        assertNotNull(overlay.visibleCurtain())
+        assertFalse(serviceShadow.queriedOnUi.get())
+    }
+
+    @Test fun verifiedHomeCompletesReturnSoAnotherHomeTapIsNotSuppressed() {
+        val latch = pendingHomeReturn()
+        apply(InstagramSearchObservation(InstagramSearchSurface.HOME, 10, "com.instagram.android",
+            cover = InstagramGeometrySample(0, 400, 1080, 1800)))
+        assertFalse(latch.isDuplicate(InstagramTab.HOME, android.os.SystemClock.uptimeMillis()))
+        assertNotNull(overlay.visibleCurtain())
+    }
+
+    @Test fun aFreshCommittedMessagesTapSupersedesThePendingHomeReturn() {
+        val latch = pendingHomeReturn()
+        apply(InstagramSearchObservation(InstagramSearchSurface.INBOX_TRANSITION, 10, "com.instagram.android"))
+        assertNull(overlay.visibleCurtain())
+        assertFalse(latch.isDuplicate(InstagramTab.HOME, android.os.SystemClock.uptimeMillis()))
+    }
+
     @Test fun strictHomeCannotUseTheBalancedStoriesGeometry() {
         ProtectionPreferences.setMode(service.getSharedPreferences(ProtectionPreferences.PREFS_NAME, 0),
             ProtectedApp.INSTAGRAM, ProtectionMode.STRICT)
@@ -358,6 +406,21 @@ class InstagramAsyncSearchServiceTest {
         // This request is bounded even if Instagram publishes no further events.
         shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(501))
         assertNull(slot.get())
+    }
+
+    @Test fun aScrolledHomeFallbackCanStillQueueTheFastMessagesCheckWithoutUiQueries() {
+        field("lastInstagramScreen", InstagramScreen.HOME_FEED)
+        field("currentInstagramWindowId", 10)
+        field("searchObservationBypassUntil", android.os.SystemClock.uptimeMillis() + 500L)
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED).apply {
+            packageName = "com.instagram.android"
+            eventTime = android.os.SystemClock.uptimeMillis()
+        })
+        val slot = AntiScrollService::class.java.getDeclaredField("pendingDirectTap").apply { isAccessible = true }
+            .get(service) as java.util.concurrent.atomic.AtomicReference<*>
+        assertNotNull(slot.get())
+        assertFalse(RecordShadow.queriedOnUi.get())
+        assertFalse(serviceShadow.queriedOnUi.get())
     }
 
 }

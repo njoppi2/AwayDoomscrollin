@@ -217,6 +217,33 @@ class InstagramSearchObservationTest {
         home(); add("reel_viewer_root")
         assertEquals(InstagramSearchSurface.OTHER, reader.read().surface)
     }
+    @Test fun collapsedHomeHeaderStillUsesMeasuredStoriesBoundary() {
+        home(); state.ids.remove("main_feed_action_bar")
+        add("reels_tray_container", Rect(0, 98, 1080, 345))
+        val result = reader.read()
+        assertEquals(InstagramSearchSurface.HOME, result.surface)
+        assertEquals(InstagramGeometrySample(0, 345, 1080, 1800), result.cover)
+        assertEquals(InstagramGeometrySample(0, 98, 1080, 345), result.stories)
+    }
+    @Test fun partiallyCollapsedStoriesAreClippedBelowRemainingHeader() {
+        home(); add("reels_tray_container", Rect(0, 98, 1080, 345))
+        val result = reader.read()
+        assertEquals(InstagramSearchSurface.HOME, result.surface)
+        assertEquals(InstagramGeometrySample(0, 180, 1080, 345), result.stories)
+        assertEquals(InstagramGeometrySample(0, 345, 1080, 1800), result.cover)
+    }
+    @Test fun collapsedHeaderWithoutTrayOrWithActiveProfileCannotBeHome() {
+        home(); state.ids.remove("main_feed_action_bar"); state.ids.remove("reels_tray_container")
+        assertEquals(InstagramSearchSurface.OTHER, reader.read().surface)
+        home(); state.ids.remove("main_feed_action_bar"); add("profile_header_container")
+        assertEquals(InstagramSearchSurface.OTHER, reader.read().surface)
+    }
+    @Test fun conversationOverRetainedInboxCannotRemountMainTabGuards() {
+        for (id in listOf("direct_thread_header", "message_list", "message_composer_bar")) {
+            state.ids.clear(); inbox(); add(id)
+            assertEquals(id, InstagramSearchSurface.OTHER, reader.read().surface)
+        }
+    }
     @Test fun completeSelectedInboxYieldsAnImmutableRelease() {
         inbox()
         val result = reader.read()
@@ -325,6 +352,18 @@ class InstagramSearchObservationTest {
             contentDescription = "SYNTHETIC_PRIVATE_ACCOUNT"
         }
         assertFalse(reader.read(directTap = directTap(source)).toString().contains("SYNTHETIC_PRIVATE"))
+    }
+
+    @Test fun messagesTapCanUseCurrentNativeBoundsWhenHomeLayoutHadNoCachedTab() {
+        selectedMessagesTab()
+        val hint = InstagramDirectTap(10, null, android.os.SystemClock.uptimeMillis()) { directSource() }
+        assertEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = hint).surface)
+    }
+    @Test fun noCachedTabDoesNotAllowASourceOutsideTheActualNativeTab() {
+        selectedMessagesTab()
+        val source = node("direct_tab", Rect(700, 1800, 900, 1900))
+        val hint = InstagramDirectTap(10, null, android.os.SystemClock.uptimeMillis()) { source }
+        assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = hint).surface)
     }
 
 }
