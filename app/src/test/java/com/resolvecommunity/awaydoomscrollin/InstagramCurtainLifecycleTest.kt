@@ -184,4 +184,31 @@ class InstagramCurtainLifecycleTest {
             .apply { isAccessible = true }.get(overlay))
     }
 
+    private fun movingHomeTouch(endX: Float, endY: Float): List<InstagramHomeStoriesGesture.Forward> {
+        val forwarded = mutableListOf<InstagramHomeStoriesGesture.Forward>()
+        overlay.updateHomeStoriesGuard(Rect(0, 100, 1080, 400)) { forwarded.add(it) }
+        val field = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow").apply { isAccessible = true }
+        val window = field.get(overlay) as Pair<*, *>
+        val guard = window.first as View
+        fun touch(action: Int, x: Float, y: Float, at: Long) {
+            val event = android.view.MotionEvent.obtain(0L, at, action, x, y, 0)
+            guard.dispatchTouchEvent(event); event.recycle()
+        }
+        touch(android.view.MotionEvent.ACTION_DOWN, 100f, 200f, 0)
+        overlay.updateHomeStoriesGuard(Rect(0, 100, 1080, 500)) { forwarded.add(it) }
+        assertEquals(Rect(0, 100, 1080, 400), (field.get(overlay) as Pair<*, *>).second)
+        touch(android.view.MotionEvent.ACTION_UP, endX, endY, 400)
+        return forwarded
+    }
+    @Test fun refreshKeepsItsPhysicalTouchWhenNativeLayoutChangesUnderTheFinger() {
+        val forwarded = movingHomeTouch(100f, 500f)
+        assertEquals(1, forwarded.size)
+        assertTrue(forwarded.single().endY > forwarded.single().y)
+    }
+    @Test fun movingRowCannotRetargetATapOrSidewaysSwipeToAnotherStory() {
+        assertTrue(movingHomeTouch(100f, 200f).isEmpty())
+        overlay.updateHomeStoriesGuard(null)
+        assertTrue(movingHomeTouch(400f, 200f).isEmpty())
+    }
+
 }

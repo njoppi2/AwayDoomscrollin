@@ -22,7 +22,8 @@ internal data class InstagramSearchObservation(
     val stories: InstagramGeometrySample? = null,
     val inbox: InstagramGeometrySample? = null,
     val directTab: InstagramGeometrySample? = null,
-    val diagnostic: String? = null
+    val diagnostic: String? = null,
+    val homeTouchBand: InstagramGeometrySample? = null
 )
 
 /** Read-only, per-observation node cache. This reader is confined to one worker. */
@@ -86,13 +87,14 @@ internal class InstagramSearchObservationReader(
         }
         fun result(surface: InstagramSearchSurface, cover: InstagramGeometrySample? = null,
             keyboard: Boolean = false, entry: InstagramGeometrySample? = null,
-            stories: InstagramGeometrySample? = null, inbox: InstagramGeometrySample? = null) =
+            stories: InstagramGeometrySample? = null, inbox: InstagramGeometrySample? = null,
+            band: InstagramGeometrySample? = null) =
             InstagramSearchObservation(surface, windowId, pkg, cover,
                 back = bounds("action_bar_button_back"), reelsTab = bounds("clips_tab"),
                 homeTab = if (surface in setOf(InstagramSearchSurface.EXPLORE, InstagramSearchSurface.HOME, InstagramSearchSurface.INBOX)) bounds("feed_tab") else null,
                 searchTab = if (surface in setOf(InstagramSearchSurface.EXPLORE, InstagramSearchSurface.HOME, InstagramSearchSurface.INBOX)) bounds("search_tab") else null,
                 searchEntry = entry, keyboardVisible = keyboard, stories = stories, inbox = inbox,
-                directTab = bounds("direct_tab"))
+                directTab = bounds("direct_tab"), homeTouchBand = band)
 
         // A positive input-focus proof is independent of stale mounted feed IDs.
         checkCurrent()
@@ -131,17 +133,19 @@ internal class InstagramSearchObservationReader(
             val stories = InstagramHomeGeometry.storiesTrayIds.firstNotNullOfOrNull { id ->
                 nodes(id).firstNotNullOfOrNull { node ->
                     Rect().also(node::getBoundsInScreen).takeIf { rect ->
-                        !rect.isEmpty && rect.left >= window.left && rect.right <= window.right &&
+                        !rect.isEmpty && rect.width() >= window.width() / 2 &&
+                            rect.left >= window.left && rect.right <= window.right &&
                             rect.top >= window.top && rect.bottom < window.centerY() &&
                             rect.height() >= 32 * density
                     }?.sample()
                 }
             }
             val bottom = bounds("tab_bar")?.top
-            if (header != null && stories != null && stories.top >= header.top &&
+            if (header != null && stories != null && stories.top >= header.bottom &&
                 bottom != null && bottom > stories.bottom && bottom > window.centerY()) {
                 return result(InstagramSearchSurface.HOME,
-                    InstagramGeometrySample(window.left, stories.bottom, window.right, bottom), stories = stories)
+                    InstagramGeometrySample(window.left, stories.bottom, window.right, bottom), stories = stories,
+                    band = InstagramGeometrySample(window.left, header.bottom, window.right, stories.bottom))
             }
             return InstagramSearchObservation(InstagramSearchSurface.OTHER, windowId, pkg,
                 diagnostic = "home-geometry-header-${header != null}-stories-${stories != null}-navigation-${bottom != null}")

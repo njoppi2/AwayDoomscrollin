@@ -280,7 +280,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             observation.searchEntry?.asRect(), observation.back?.asRect(),
             observation.directTab?.asRect(), observation.stories?.asRect())
         refreshHomeStoriesGuard(observation.windowId,
-            observation.stories.takeIf { screen == InstagramScreen.HOME_FEED })
+            observation.stories.takeIf { screen == InstagramScreen.HOME_FEED }, observation.homeTouchBand)
         if (instagramOverlay.hasVisibleWindows) scheduleOverlayForegroundCheck()
         if (searchReturnVerification.needsAnotherObservation(
                 observation.surface, observation.keyboardVisible, SystemClock.uptimeMillis())) {
@@ -292,7 +292,8 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                 "keyboard=${observation.keyboardVisible}")
     }
 
-    private data class HomeStoriesTarget(val windowId: Int, val bounds: InstagramGeometrySample)
+    private data class HomeStoriesTarget(val windowId: Int, val bounds: InstagramGeometrySample,
+        val touchBounds: InstagramGeometrySample)
     private val homeStoriesTarget = AtomicReference<HomeStoriesTarget?>()
     private var homeStoriesReplayPending = false
     private val homeStoriesForwardEpoch = AtomicLong()
@@ -304,22 +305,27 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         instagramOverlay.updateHomeStoriesGuard(null)
     }
 
-    private fun refreshHomeStoriesGuard(windowId: Int, stories: InstagramGeometrySample?) {
+    private fun refreshHomeStoriesGuard(windowId: Int, stories: InstagramGeometrySample?, band: InstagramGeometrySample?) {
         val metrics = resources.displayMetrics
-        if (stories == null || stories.left < 0 || stories.right > metrics.widthPixels ||
-            stories.right <= stories.left || stories.top < 0 || stories.bottom >= metrics.heightPixels / 2 ||
+        if (stories == null || band == null || band.left != stories.left || band.right != stories.right ||
+            band.top < 0 || band.top > stories.top || band.bottom != stories.bottom ||
+            stories.left < 0 || stories.right > metrics.widthPixels ||
+            stories.right - stories.left < metrics.widthPixels / 2 || stories.top < 0 || stories.bottom >= metrics.heightPixels / 2 ||
             stories.bottom - stories.top < dp(32) || lastInstagramScreen != InstagramScreen.HOME_FEED ||
             ProtectionPreferences.getMode(this, ProtectedApp.INSTAGRAM) != ProtectionMode.BALANCED ||
             !ProtectionPreferences.isHomeStoriesSwipeLockEnabled(this)) {
             clearHomeStoriesGuard()
             return
         }
-        val candidate = HomeStoriesTarget(windowId, stories)
+        // Native refresh moves the tray while its drag is in flight. Replacing
+        // the target here used to re-arm a moving hitbox before replay finished.
+        if (homeStoriesReplayPending && homeStoriesTarget.get()?.windowId == windowId) return
+        val candidate = HomeStoriesTarget(windowId, stories, band)
         if (homeStoriesTarget.get() != candidate) {
             homeStoriesTarget.set(candidate)
             homeStoriesReplayPending = false
         }
-        if (!homeStoriesReplayPending) instagramOverlay.updateHomeStoriesGuard(stories.asRect(), onBegin = {
+        if (!homeStoriesReplayPending) instagramOverlay.updateHomeStoriesGuard(band.asRect(), onBegin = {
             // A new physical touch supersedes an older completed gesture which
             // is still waiting for verification. Do not cancel it by injection.
             homeStoriesForwardEpoch.incrementAndGet()
@@ -342,17 +348,24 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             val verified = runCatching { searchObservationReader.value.read(::current) }.getOrNull()
             mainHandler.post ready@ {
                 if (!current()) return@ready
+                val refresh = gesture.endY > gesture.y
                 if (verified?.surface != InstagramSearchSurface.HOME || verified.windowId != target.windowId ||
-                    verified.stories != target.bounds) {
+                    verified.stories == null || (!refresh && verified.stories != target.bounds)) {
                     clearHomeStoriesGuard()
                     queueInstagramScan(0L)
                     return@ready
                 }
-                val bounds = target.bounds
-                val x = gesture.x.coerceIn(bounds.left + 1f, bounds.right - 1f)
-                val endX = gesture.endX.coerceIn(bounds.left + 1f, bounds.right - 1f)
-                val y = gesture.y.coerceIn(bounds.top + 1f, bounds.bottom - 1f)
-                val endY = gesture.endY.coerceIn(y, resources.displayMetrics.heightPixels - 1f)
+                val native = gesture.forStories(verified.stories, resources.displayMetrics.heightPixels,
+                    verified.homeTouchBand?.top ?: verified.stories.top)
+                if (native == null) {
+                    clearHomeStoriesGuard()
+                    queueInstagramScan(0L)
+                    return@ready
+                }
+                val x = native.x
+                val endX = native.endX
+                val y = native.y
+                val endY = native.endY
                 val path = Path().apply {
                     moveTo(x, y)
                     if (endX != x || endY != y) lineTo(endX, endY)
@@ -370,13 +383,25 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                     requestSearchObservation(invalidate = true)
                 }
                 val description = GestureDescription.Builder().addStroke(
-                    GestureDescription.StrokeDescription(path, 0L, gesture.durationMs)).build()
-                val accepted = runCatching { dispatchGesture(description, object : GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription) = finished()
-                    override fun onCancelled(gestureDescription: GestureDescription) = finished()
-                }, mainHandler) }.getOrDefault(false)
-                if (!accepted) finished()
-                ProtectionFlightRecorder.record(this, "instagram.home.stories-forward", "accepted=$accepted horizontal=${endX != x} refresh=${endY > y}")
+                    GestureDescription.StrokeDescription(path, 0L, native.durationMs)).build()
+                // Removing an input window is asynchronous at InputDispatcher.
+                // As in the existing guarded-list replay paths, allow its removal
+                // to settle before sending DOWN, then check cancellation again.
+                mainHandler.postDelayed(dispatch@ {
+                    if (!current()) { finished(); return@dispatch }
+                    fun result(completed: Boolean) {
+                        ProtectionFlightRecorder.record(this, "instagram.home.stories-result",
+                            "completed=$completed horizontal=${endX != x} refresh=${endY > y}")
+                        finished()
+                    }
+                    val accepted = runCatching { dispatchGesture(description, object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription) = result(true)
+                        override fun onCancelled(gestureDescription: GestureDescription) = result(false)
+                    }, mainHandler) }.getOrDefault(false)
+                    if (!accepted) finished()
+                    ProtectionFlightRecorder.record(this, "instagram.home.stories-forward",
+                        "accepted=$accepted horizontal=${endX != x} refresh=${endY > y}")
+                }, 48L)
             }
         }
         mainHandler.postDelayed({
@@ -9245,7 +9270,9 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             ?: findAttachedHomeStoriesBounds(root, displayBounds)
         }
         if (lastInstagramScreen == InstagramScreen.HOME_FEED) {
-            refreshHomeStoriesGuard(root.windowId, stories?.toInstagramGeometrySample())
+            val headerBottom = attachedInstagramBounds(root, displayBounds, "main_feed_action_bar")?.bottom
+            val band = stories?.let { Rect(it).apply { top = headerBottom ?: top } }
+            refreshHomeStoriesGuard(root.windowId, stories?.toInstagramGeometrySample(), band?.toInstagramGeometrySample())
             if (ProtectionFlightRecorder.ENABLED && stories != null) ProtectionFlightRecorder.record(
                 this, "instagram.home.geometry", "stories=${stories.left},${stories.top},${stories.right},${stories.bottom}")
         }

@@ -14,7 +14,7 @@ AwayDoomscrollin' utilizes the Android Accessibility Service API exclusively to 
 - **Development diagnostics:** Debug builds keep a bounded app-private local trace of structural view IDs, screen classifications, geometry and timings. Screen text and titles, including chat and account names, are excluded. This trace is not uploaded by the app and is not enabled in release builds.
 - **Beta status and limitations:** Instagram, TikTok, and YouTube Shorts detection is a beta feature. Their interfaces and accessibility trees are controlled by third parties and can change without notice. Detection can therefore be missed or a safe area can be misclassified. No claim of perfect detection, perfect safe-zone classification, or compatibility with every device/OS build is made.
 
-The optional Home Stories upward-swipe lock processes completed touch coordinates and durations only in memory to replay permitted taps, horizontal swipes and downward refresh pulls. It does not retain or upload these touch paths. It is off by default in release builds; development test builds enable it initially.
+The optional Home Stories upward-swipe lock covers the uncovered area below the toolbar, including refresh space. It processes completed touch coordinates and durations only in memory to replay permitted taps, horizontal swipes and downward refresh pulls. It does not retain or upload these touch paths. It is off by default in release builds; development test builds enable it initially.
 
 ## 3. Data Collection and Telemetry
 Screen analysis and blocking run locally on the device. The Android manifest declares `android.permission.INTERNET` only for the optional telemetry path disclosed below; the app is therefore offline-first, not a zero-network-permission app.

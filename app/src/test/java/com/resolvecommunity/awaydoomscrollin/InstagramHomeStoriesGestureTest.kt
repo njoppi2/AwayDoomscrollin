@@ -51,4 +51,27 @@ class InstagramHomeStoriesGestureTest {
         g.begin(100f, 100f, 0); g.cancel()
         assertNull(g.finish(400f, 100f, 200))
     }
+    @Test fun sameFingerPositionRefreshesEvenWhenTheTrayMovesBelowIt() {
+        val pull = InstagramHomeStoriesGesture.Forward(100f, 200f, 100f, 500f, 400L)
+        for (top in listOf(100, 300)) {
+            val native = pull.forStories(InstagramGeometrySample(0, top, 1080, top + 200), 1920)!!
+            assertEquals(300f, native.endY - native.y)
+            assertTrue(native.y >= top)
+            assertEquals(native.x, native.endX)
+        }
+    }
+    @Test fun blankRefreshGapCannotOpenAStoryOrForwardASidewaysSwipe() {
+        val stories = InstagramGeometrySample(0, 300, 1080, 500)
+        assertNull(InstagramHomeStoriesGesture.Forward(100f, 200f, 100f, 200f, 80L).forStories(stories, 1920))
+        assertNull(InstagramHomeStoriesGesture.Forward(100f, 200f, 400f, 200f, 300L).forStories(stories, 1920))
+    }
+
+    @Test fun refreshStartsBelowFixedToolbarEvenIfTraySettlesDuringTheHandoff() {
+        val pull = InstagramHomeStoriesGesture.Forward(100f, 200f, 100f, 500f, 400L)
+        val native = pull.forStories(InstagramGeometrySample(0, 482, 1080, 871), 1920, refreshTop = 266)!!
+        assertTrue(native.y > 266)
+        assertTrue(native.y < 655)
+        assertEquals(300f, native.endY - native.y)
+    }
+
 }

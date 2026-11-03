@@ -290,12 +290,20 @@ internal class InstagramFeedOverlayController(
 
     private var homeStoriesWindow: Pair<View, Rect>? = null
     private var homeStoriesGesture: InstagramHomeStoriesGesture? = null
+    private var homeStoriesGeometryChanged = false
 
     // This transparent input filter is excluded from accessibility navigation;
     // a permitted physical tap is replayed to the native Story underneath it.
     @SuppressLint("ClickableViewAccessibility")
     internal fun updateHomeStoriesGuard(bounds: Rect?, onBegin: () -> Unit = {}, onForward: (InstagramHomeStoriesGesture.Forward) -> Unit = {}) {
         val previous = homeStoriesWindow
+        if (previous != null && bounds != null && !bounds.isEmpty && previous.second != bounds &&
+            homeStoriesGesture?.isTracking == true) {
+            // Keep this physical touch stream stable as native refresh moves
+            // the row. Point-specific taps/swipes are retired at finger-up.
+            homeStoriesGeometryChanged = true
+            return
+        }
         if (previous?.second != bounds) homeStoriesGesture?.cancel()
         homeStoriesWindow = updateNotificationWindow(previous, bounds, "Home Stories swipe lock",
             replaceTouchListener = false)
@@ -306,6 +314,7 @@ internal class InstagramFeedOverlayController(
         window.first.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    homeStoriesGeometryChanged = false
                     onBegin()
                     gesture.begin(event.rawX, event.rawY, event.eventTime)
                 }
@@ -317,6 +326,8 @@ internal class InstagramFeedOverlayController(
                 MotionEvent.ACTION_UP -> {
                     if (event.pointerCount == 1) {
                         val forward = gesture.finish(event.rawX, event.rawY, event.eventTime)
+                            ?.takeUnless { homeStoriesGeometryChanged && it.endY <= it.y }
+                        homeStoriesGeometryChanged = false
                         if (forward != null) onForward(forward)
                         else ProtectionFlightRecorder.record(service, "instagram.home.stories-consume", "forwarded=false")
                     } else gesture.cancel()
@@ -1177,7 +1188,11 @@ internal class InstagramFeedOverlayController(
                         }
                     }
                     MotionEvent.ACTION_CANCEL -> { profileGesture = false }
-                    MotionEvent.ACTION_UP -> view.performClick()
+                    MotionEvent.ACTION_UP -> {
+                        if (currentCopyKey?.startsWith("HOME_FEED:") == true) ProtectionFlightRecorder.record(
+                            service, "instagram.home.cover-consume", "forwarded=false")
+                        view.performClick()
+                    }
                 }
                 true
             }

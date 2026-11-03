@@ -196,8 +196,8 @@ class InstagramAsyncSearchServiceTest {
         node("tab_bar", Rect(0, height - 40, width, height))
         serviceShadow.root = root
         AntiScrollService::class.java.getDeclaredMethod("refreshHomeStoriesGuard",
-            Int::class.javaPrimitiveType, InstagramGeometrySample::class.java).apply {
-            isAccessible = true; invoke(service, 10, stories)
+            Int::class.javaPrimitiveType, InstagramGeometrySample::class.java, InstagramGeometrySample::class.java).apply {
+            isAccessible = true; invoke(service, 10, stories, stories)
         }
         val guard = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
             .apply { isAccessible = true }.get(overlay) as Pair<*, *>
@@ -221,6 +221,8 @@ class InstagramAsyncSearchServiceTest {
         val (stories, _) = prepareHomeReplay()
         queueHomeReplay(stories)
         runHomeWorker()
+        assertEquals(0, serviceShadow.dispatched)
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(48))
         assertEquals(1, serviceShadow.dispatched)
         assertFalse(serviceShadow.queriedOnUi.get())
     }
@@ -270,6 +272,35 @@ class InstagramAsyncSearchServiceTest {
         })
         runHomeWorker()
         assertEquals(0, serviceShadow.dispatched)
+    }
+
+    @Test fun leavingDuringInputWindowRemovalCancelsDelayedReplay() {
+        val (stories, _) = prepareHomeReplay()
+        queueHomeReplay(stories)
+        runHomeWorker()
+        assertEquals(0, serviceShadow.dispatched)
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_WINDOWS_CHANGED).apply {
+            packageName = "com.android.systemui"
+        })
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(48))
+        assertEquals(0, serviceShadow.dispatched)
+    }
+
+    @Test fun movingTrayObservationCannotRearmTheGuardDuringReplay() {
+        val (stories, guard) = prepareHomeReplay()
+        queueHomeReplay(stories)
+        val moved = stories.copy(top = stories.top + 10, bottom = stories.bottom + 10)
+        val targetField = AntiScrollService::class.java.getDeclaredField("homeStoriesTarget").apply { isAccessible = true }
+        val target = targetField.get(service) as java.util.concurrent.atomic.AtomicReference<*>
+        val original = target.get()
+        AntiScrollService::class.java.getDeclaredMethod("refreshHomeStoriesGuard", Int::class.javaPrimitiveType,
+            InstagramGeometrySample::class.java, InstagramGeometrySample::class.java).apply {
+            isAccessible = true; invoke(service, 10, moved, moved)
+        }
+        assertSame(original, target.get())
+        val window = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
+            .apply { isAccessible = true }.get(overlay) as Pair<*, *>
+        assertSame(guard, window.first)
     }
 
 }
