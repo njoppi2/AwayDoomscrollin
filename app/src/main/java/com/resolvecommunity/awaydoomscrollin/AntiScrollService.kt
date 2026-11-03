@@ -26,6 +26,8 @@ import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 class AntiScrollService : AccessibilityService() {
@@ -80,6 +82,277 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val searchObservationThread = lazy {
+        HandlerThread("InstagramSearchDetector").apply { start() }
+    }
+    private var searchObservationActive = false
+    private var searchObservationUnknownSince = 0L
+    private var searchObservationBypassUntil = 0L
+    private var lastSearchGeometryTrace = ""
+    private var lastSearchObservation: InstagramSearchObservation? = null
+    private var lastAsyncExploreCover: Pair<Int, InstagramGeometrySample>? = null
+    private var searchBackPending = false
+    private val searchBackEpoch = AtomicLong()
+    private val searchReturnVerification = InstagramSearchReturnVerification()
+    private fun traceSearchGeometry(home: Rect?, tab: Rect?, entry: Rect? = null, back: Rect? = null, direct: Rect? = null, stories: Rect? = null) {
+        if (!ProtectionFlightRecorder.ENABLED) return
+        fun coordinates(bounds: Rect?) = bounds?.let { "${it.left},${it.top},${it.right},${it.bottom}" } ?: "none"
+        val detail = "home=${coordinates(home)} tab=${coordinates(tab)} entry=${coordinates(entry)} back=${coordinates(back)} direct=${coordinates(direct)} stories=${coordinates(stories)}"
+        if (detail == lastSearchGeometryTrace) return
+        lastSearchGeometryTrace = detail
+        ProtectionFlightRecorder.record(this, "instagram.search.geometry", detail)
+    }
+    private val searchObservationReader = lazy {
+        val metrics = resources.displayMetrics
+        InstagramSearchObservationReader(
+            { rootInActiveWindow }, { windows },
+            InstagramGeometrySample(0, 0, metrics.widthPixels, metrics.heightPixels), metrics.density)
+    }
+    private val searchForegroundDispatcher = lazy {
+        val reader = searchObservationReader.value
+        val worker = Handler(searchObservationThread.value.looper)
+        LatestObservationDispatcher(
+            Executor { worker.post(it) }, Executor { mainHandler.post(it) }, { reader.checkForeground() },
+            accept = { result ->
+                if (searchObservationActive) {
+                    val observation = result.getOrNull()
+                    if (observation?.surface == InstagramSearchSurface.DEPARTED) applySearchObservation(observation)
+                    else scheduleOverlayForegroundCheck()
+                }
+            })
+    }
+    private val searchObservationDispatcher = lazy {
+        val reader = searchObservationReader.value
+        val worker = Handler(searchObservationThread.value.looper)
+        LatestObservationDispatcher(
+            Executor { worker.post(it) }, Executor { mainHandler.post(it) },
+            read = { isCurrent ->
+                val started = SystemClock.uptimeMillis()
+                val observation = reader.read(isCurrent)
+                if (ProtectionFlightRecorder.ENABLED) ProtectionFlightRecorder.record(
+                    this, "instagram.search.worker",
+                    "elapsedMs=${SystemClock.uptimeMillis() - started} surface=${observation.surface} reason=${observation.diagnostic}")
+                observation
+            },
+            accept = { result ->
+                if (searchObservationActive) result.fold(
+                    ::applySearchObservation, { fallBackFromSearchObservation() })
+            })
+    }
+
+    private fun canObserveSearchAsynchronously(): Boolean =
+        taskSwitcherOwner == null && !instagramOverlay.isNotificationShadeSuspended &&
+            !instagramResumePending && !instagramResumeGeometryGate.isActive &&
+            !instagramExitInProgress && !instagramProfileIngress.pending &&
+            !instagramProfileIngress.awaitingCurtainDraw &&
+            !instagramProtectedNavigation.isAwaitingDispatch(SystemClock.uptimeMillis()) &&
+            SystemClock.uptimeMillis() >= searchObservationBypassUntil &&
+            ProtectionPreferences.isEnabled(this, ProtectedApp.INSTAGRAM) &&
+            (lastInstagramScreen == InstagramScreen.EXPLORE ||
+                lastInstagramScreen == InstagramScreen.SEARCH_RESULTS ||
+                (lastInstagramScreen == InstagramScreen.HOME_FEED &&
+                    ProtectionPreferences.getMode(this, ProtectedApp.INSTAGRAM) == ProtectionMode.BALANCED &&
+                    !instagramAlternateFeedActive))
+
+    private fun requestSearchObservation(invalidate: Boolean = false): Boolean {
+        if (searchObservationActive && searchBackPending) return true
+        if (!canObserveSearchAsynchronously()) return false
+        if (!searchObservationActive) searchObservationUnknownSince = 0L
+        searchObservationActive = true
+        if (invalidate && searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.cancel()
+        searchObservationDispatcher.value.request(invalidate)
+        return true
+    }
+
+    private fun cancelSearchObservation() {
+        searchObservationActive = false
+        searchObservationUnknownSince = 0L
+        lastSearchObservation = null
+        lastAsyncExploreCover = null
+        searchBackPending = false
+        searchBackEpoch.incrementAndGet()
+        searchReturnVerification.clear()
+        if (searchObservationDispatcher.isInitialized()) searchObservationDispatcher.value.cancel()
+        if (searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.cancel()
+    }
+
+    private fun fallBackFromSearchObservation() {
+        cancelSearchObservation()
+        // A positive departure, unsupported hierarchy or read failure is handed
+        // back to the established classifier. Never fail open on an unknown tree.
+        searchObservationBypassUntil = SystemClock.uptimeMillis() + 500L
+        queueInstagramScan(0L)
+    }
+
+    private fun applySearchObservation(observation: InstagramSearchObservation) {
+        if (!canObserveSearchAsynchronously()) {
+            cancelSearchObservation()
+            return
+        }
+        val started = SystemClock.uptimeMillis()
+        when (observation.surface) {
+            InstagramSearchSurface.UNKNOWN -> {
+                if (searchObservationUnknownSince == 0L) searchObservationUnknownSince = started
+                if (started - searchObservationUnknownSince >= 250L) fallBackFromSearchObservation()
+                else queueInstagramScan(48L)
+                return
+            }
+            InstagramSearchSurface.OTHER -> { fallBackFromSearchObservation(); return }
+            InstagramSearchSurface.DEPARTED -> {
+                cancelSearchObservation()
+                suspendInstagramProtection(observation.packageName)
+                trackPackageTransition("")
+                return
+            }
+            InstagramSearchSurface.FOREGROUND -> return
+            else -> Unit
+        }
+        if (observation.surface == InstagramSearchSurface.HOME && instagramStoriesBlocked()) {
+            fallBackFromSearchObservation()
+            return
+        }
+        if (observation.surface == InstagramSearchSurface.INBOX) {
+            // All tree evidence was obtained on the serial reader. UI work here
+            // only retires windows and copies values; messaging stays native.
+            cancelSearchObservation()
+            currentInstagramWindowId = observation.windowId
+            verifiedInstagramInboxWindowId = observation.windowId
+            verifiedInstagramInboxListBounds = observation.inbox?.asRect()
+            directConversationSurfaceWindowId = -1
+            clearDirectConversationEntryGuard()
+            cancelInstagramExit()
+            clearDirectDetailsScrollGuard()
+            clearInstagramResumeProtection()
+            instagramOverlay.hide()
+            directNavigationUntil = 0L
+            directNavigationSourceWindowId = -1
+            instagramEntryTargets.clear()
+            lastDirectConversationGuards.clear()
+            instagramOverlay.updateEntryGuards(emptyList(), isEnglish())
+            clearNonMessagingTouchGuards()
+            instagramOverlay.updateNavigationGuards(emptyMap())
+            instagramOverlay.updateSearchReturnGuard(null) {}
+            instagramOverlay.updateReelsTabGuard(observation.reelsTab?.asRect())
+            observeInstagramScreen(InstagramScreen.DIRECT_MESSAGES, observation.windowId)
+            directDetailsLaunchPendingUntil = 0L
+            directDetailsFallbackBackAt = 0L
+            directReelLaunchPendingUntil = 0L
+            if (exitGate.observe(InstagramScreen.DIRECT_MESSAGES, SystemClock.uptimeMillis())) queueInstagramScan(450L)
+            traceSearchGeometry(observation.homeTab?.asRect(), observation.searchTab?.asRect(),
+                direct = observation.directTab?.asRect())
+            ProtectionFlightRecorder.record(this, "instagram.inbox.apply",
+                "elapsedMs=${SystemClock.uptimeMillis() - started}")
+            if (instagramOverlay.hasVisibleWindows) scheduleOverlayForegroundCheck()
+            return
+        }
+        searchObservationUnknownSince = 0L
+        lastSearchObservation = observation
+        if (observation.surface == InstagramSearchSurface.EXPLORE && observation.cover != null) {
+            lastAsyncExploreCover = observation.windowId to observation.cover
+        }
+        currentInstagramWindowId = observation.windowId
+        clearDirectConversationEntryGuard()
+        clearDirectDetailsScrollGuard()
+        clearInstagramResumeProtection()
+        instagramEntryTargets.clear()
+        instagramOverlay.updateEntryGuards(emptyList(), isEnglish())
+        val searching = observation.surface == InstagramSearchSurface.SEARCH
+        val screen = when (observation.surface) {
+            InstagramSearchSurface.SEARCH -> InstagramScreen.SEARCH_RESULTS
+            InstagramSearchSurface.HOME -> InstagramScreen.HOME_FEED
+            else -> InstagramScreen.EXPLORE
+        }
+        if (searching) instagramExploreSearchSeen = true
+        observeInstagramScreen(screen, observation.windowId)
+        if (observation.cover != null) {
+            showInstagramCurtain(observation.cover.asRect(),
+                if (screen == InstagramScreen.HOME_FEED) screen else InstagramScreen.EXPLORE)
+        } else hideInstagramContentOverlay()
+        instagramOverlay.updateReelsTabGuard(observation.reelsTab?.asRect())
+        instagramOverlay.updateSearchReturnGuard(observation.back?.asRect(), ::onSearchReturnBack)
+        instagramOverlay.updateNavigationGuards(if (searching) emptyMap() else buildMap {
+            observation.homeTab?.let { put(InstagramTab.HOME, it.asRect()) }
+            observation.searchTab?.let { put(InstagramTab.SEARCH, it.asRect()) }
+        })
+        traceSearchGeometry(observation.homeTab?.asRect(), observation.searchTab?.asRect(),
+            observation.searchEntry?.asRect(), observation.back?.asRect(),
+            observation.directTab?.asRect(), observation.stories?.asRect())
+        if (instagramOverlay.hasVisibleWindows) scheduleOverlayForegroundCheck()
+        if (searchReturnVerification.needsAnotherObservation(
+                observation.surface, observation.keyboardVisible, SystemClock.uptimeMillis())) {
+            queueInstagramScan(48L)
+        }
+        if (ProtectionFlightRecorder.ENABLED) ProtectionFlightRecorder.record(
+            this, "instagram.search.apply",
+            "elapsedMs=${SystemClock.uptimeMillis() - started} surface=${observation.surface} " +
+                "keyboard=${observation.keyboardVisible}")
+    }
+
+    private fun InstagramGeometrySample.asRect() = Rect(left, top, right, bottom)
+
+    private fun returnFromAsyncSearch(): Boolean {
+        val observation = lastSearchObservation ?: return false
+        if (!searchObservationActive || observation.surface != InstagramSearchSurface.SEARCH) return false
+        if (searchBackPending) return true
+        val cachedCover = lastAsyncExploreCover?.takeIf { (windowId, bounds) ->
+            windowId == observation.windowId && bounds.right - bounds.left == resources.displayMetrics.widthPixels &&
+                bounds.bottom <= resources.displayMetrics.heightPixels
+        }?.second
+        if (!observation.keyboardVisible && cachedCover == null) return false
+        searchBackPending = true
+        val token = searchBackEpoch.incrementAndGet()
+        val deadline = SystemClock.uptimeMillis() + 500L
+        searchObservationDispatcher.value.cancel()
+        if (searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.cancel()
+        var dispatched = false
+        fun dispatch() {
+            if (dispatched || !searchBackPending || searchBackEpoch.get() != token) return
+            dispatched = true
+            Handler(searchObservationThread.value.looper).post {
+                fun current() = searchBackEpoch.get() == token && SystemClock.uptimeMillis() < deadline
+                val accepted = runCatching {
+                    val root = if (current()) rootInActiveWindow else null
+                    if (root?.packageName?.toString() != INSTAGRAM_PACKAGE || root.windowId != observation.windowId ||
+                        !ProtectionPreferences.isEnabled(this, ProtectedApp.INSTAGRAM)) false
+                    else {
+                        val back = root.findAccessibilityNodeInfosByViewId("$INSTAGRAM_PACKAGE:id/action_bar_button_back")
+                            .firstOrNull { it.isVisibleToUser }
+                        val editor = root.findAccessibilityNodeInfosByViewId("$INSTAGRAM_PACKAGE:id/action_bar_search_edit_text")
+                            .any { it.isVisibleToUser }
+                        if (back == null || !editor || !current()) false
+                        else if (isInputMethodVisible()) current() && performGlobalAction(GLOBAL_ACTION_BACK)
+                        else (current() && back.performAction(AccessibilityNodeInfo.ACTION_CLICK)) ||
+                            (current() && performGlobalAction(GLOBAL_ACTION_BACK))
+                    }
+                }.getOrDefault(false)
+                mainHandler.post completion@ {
+                    if (searchBackEpoch.get() != token) return@completion
+                    searchBackPending = false
+                    if (accepted) searchReturnVerification.begin(
+                        observation.keyboardVisible, SystemClock.uptimeMillis())
+                    if (ProtectionFlightRecorder.ENABLED) ProtectionFlightRecorder.record(
+                        this, "instagram.search.return", "accepted=$accepted")
+                    requestSearchObservation(invalidate = true)
+                }
+            }
+        }
+        if (observation.keyboardVisible) dispatch()
+        else {
+            clearInstagramResumeProtection()
+            showInstagramCurtain(cachedCover!!.asRect(), InstagramScreen.EXPLORE)
+            premountReelsTabGuard()
+            instagramOverlay.afterCurtainDraw { dispatch() }
+            mainHandler.postDelayed({ dispatch() }, INSTAGRAM_PROTECTED_NAVIGATION_FALLBACK_MS)
+        }
+        mainHandler.postDelayed({
+            if (searchBackEpoch.get() == token && searchBackPending) {
+                searchBackEpoch.incrementAndGet()
+                searchBackPending = false
+                requestSearchObservation(invalidate = true)
+            }
+        }, 500L)
+        return true
+    }
     // Instagram can block the accessibility service's main looper for several
     // seconds while it rebuilds a notification/comment tree.  The second Back
     // for a verified notification comment viewer must not wait behind that
@@ -917,6 +1190,14 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         override fun run() {
             overlayForegroundCheckScheduled = false
             if (!instagramOverlay.hasVisibleWindows) return
+            if (searchObservationActive && searchBackPending) {
+                scheduleOverlayForegroundCheck()
+                return
+            }
+            if (searchObservationActive && canObserveSearchAsynchronously()) {
+                searchForegroundDispatcher.value.request()
+                return
+            }
 
             val activeRoot = rootInActiveWindow
             val activePkg = activeRoot?.packageName?.toString()
@@ -1045,6 +1326,14 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         maybeRecordHeartbeat()
 
         val reportedPackage = event.packageName?.toString()
+        if (reportedPackage != null && reportedPackage != INSTAGRAM_PACKAGE &&
+            reportedPackage != this.packageName && searchObservationActive) {
+            // An IME/system window event is not proof of app departure. Drop
+            // older reads now; normal foreground routing or the worker's final
+            // package check owns suspension and clears the session if needed.
+            if (searchObservationDispatcher.isInitialized()) searchObservationDispatcher.value.cancel()
+            if (searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.cancel()
+        }
         if (reportedPackage != null && event.windowId >= 0) {
             windowPackages[event.windowId] = reportedPackage
         }
@@ -1094,6 +1383,28 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             // No node/source lookup here: measure delivery before foreground IPC.
             Log.d(TAG, "IG_PROFILE_RETURN_EVENT type=${event.eventType} window=${event.windowId} " +
                 "eventAt=${event.eventTime} receivedAt=${SystemClock.uptimeMillis()}")
+        }
+        if (reportedPackage == INSTAGRAM_PACKAGE && searchBackPending &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            // A new native destination must not inherit a queued Search Back.
+            // Observe the result of the earlier request without another action.
+            searchBackEpoch.incrementAndGet()
+            searchBackPending = false
+            searchReturnVerification.begin(lastSearchObservation?.keyboardVisible == true,
+                SystemClock.uptimeMillis())
+        }
+        // Home/Explore/search reads are isolated from this event/UI thread. Clicks
+        // and window changes invalidate older observations; content bursts only
+        // request one conflated follow-up. Do not inspect event text or sources.
+        if (reportedPackage == INSTAGRAM_PACKAGE && requestSearchObservation(
+                invalidate = event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+                lastInstagramUserInputAt = event.eventTime
+                exitGate.userClick(event.eventTime)
+            }
+            return
         }
         // The header collapse of a profile fling publishes only content
         // changes (no scroll event) and a still profile publishes none, so
@@ -1431,7 +1742,9 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         val click = queuedClick
         queuedClick = null
         val started = SystemClock.uptimeMillis()
-        try { scanInstagram(click) } finally {
+        try {
+            if (!requestSearchObservation()) scanInstagram(click)
+        } finally {
             @Suppress("DEPRECATION")
             click?.recycle()
             clearNodeLookupCache()
@@ -3337,6 +3650,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     private fun onSearchReturnBack() {
         if (!ProtectionPreferences.isEnabled(this, ProtectedApp.INSTAGRAM) ||
             lastInstagramScreen != InstagramScreen.SEARCH_RESULTS) return
+        if (returnFromAsyncSearch()) return
         val root = rootInActiveWindow ?: return
         if (root.packageName?.toString() != INSTAGRAM_PACKAGE) return
         if (isInputMethodVisible()) {
@@ -7822,6 +8136,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
                 }?.let { targets[tab] = it }
         }
         instagramOverlay.updateNavigationGuards(targets)
+        traceSearchGeometry(targets[InstagramTab.HOME], targets[InstagramTab.SEARCH])
         // Visible nodes only: a Story camera/editor opened over the main
         // activity keeps Home's header and heart in its tree, hidden. Guarding
         // that heart put a touch window over the editor's text (Aa) button.
@@ -8257,6 +8572,11 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     private fun onInstagramProtectedNavigation(tab: InstagramTab) {
+        searchBackEpoch.incrementAndGet()
+        searchBackPending = false
+        searchReturnVerification.clear()
+        if (searchObservationDispatcher.isInitialized()) searchObservationDispatcher.value.cancel()
+        if (searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.cancel()
         if (tab != InstagramTab.HOME && tab != InstagramTab.SEARCH) return
         if (!ProtectionPreferences.isEnabled(this, ProtectedApp.INSTAGRAM)) return
         val now = SystemClock.uptimeMillis()
@@ -9488,6 +9808,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     private fun resetInstagramProtectionState() {
+        cancelSearchObservation()
         releaseDirectModalCover("reset")
         instagramCollectionFeedOrigin = null
         precoverDrawPendingUntil = 0L
@@ -9713,6 +10034,9 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     override fun onDestroy() {
+        if (searchObservationDispatcher.isInitialized()) searchObservationDispatcher.value.close()
+        if (searchForegroundDispatcher.isInitialized()) searchForegroundDispatcher.value.close()
+        if (searchObservationThread.isInitialized()) searchObservationThread.value.quitSafely()
         if (ProtectionFlightRecorder.ENABLED) {
             ProtectionFlightRecorder.record(this, "service.destroy")
         }

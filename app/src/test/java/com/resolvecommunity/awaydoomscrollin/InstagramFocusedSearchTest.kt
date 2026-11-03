@@ -43,6 +43,7 @@ class InstagramFocusedSearchTest {
             focusQueries++
             return inputFocus.takeIf { focus == AccessibilityNodeInfo.FOCUS_INPUT }
         }
+        @Suppress("UNUSED_PARAMETER")
         @Implementation fun findAccessibilityNodeInfosByViewId(id: String): List<AccessibilityNodeInfo> {
             lookups++
             return emptyList()
