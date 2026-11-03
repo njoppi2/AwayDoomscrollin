@@ -25,6 +25,17 @@ enum class ProtectionMode {
 object ProtectionPreferences {
     const val PREFS_NAME = "away_doomscroll_prefs"
 
+    // Optional Home Stories axis filter; allowed gestures replay after finger-up.
+    const val KEY_IG_HOME_STORIES_SWIPE_LOCK = "ig_home_stories_swipe_lock"
+
+    fun isHomeStoriesSwipeLockEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(
+            KEY_IG_HOME_STORIES_SWIPE_LOCK, context.resources.getBoolean(R.bool.default_home_stories_swipe_lock))
+
+    fun setHomeStoriesSwipeLock(context: Context, enabled: Boolean): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_IG_HOME_STORIES_SWIPE_LOCK, enabled).commit()
+
     private fun modeKey(app: ProtectedApp): String =
         "protection_mode_${app.name.lowercase()}"
 

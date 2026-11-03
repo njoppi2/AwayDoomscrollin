@@ -46,3 +46,9 @@ Instagram Reels, TikTok, and YouTube Shorts detection are beta features. Third-p
 Out of scope: vulnerabilities in Android OS, third-party libraries, or user device configurations.
 
 
+
+## Home gesture scope and asynchronous observations
+
+Balanced Instagram can optionally lock upward drags starting in the uncovered Home Stories strip. Story taps, horizontal swipes and downward pulls for refresh are replayed after finger-up; the replay can feel slower, and its brief forwarding interval is not a guarantee against every rapid gesture. This option is off by default in release builds and on by default in the separate development test build. It does not intercept messages or recording controls, add permissions or transmit gesture data. Supported Balanced Home and Explore/search layouts use a serial background reader with bounded, conflated work; unknown or unsupported layouts retain protection and return to the existing detector.
+
+A gesture is forwarded at most once, after a same-window Home check. Upward, ambiguous diagonal, cancelled and multi-touch gestures are consumed. Foreground, navigation, preference and lifetime changes invalidate pending work. Re-arming requires a fresh Home observation, including after Story taps. The existing accessibility permission supplies gesture dispatch; no new permission or network destination is added.

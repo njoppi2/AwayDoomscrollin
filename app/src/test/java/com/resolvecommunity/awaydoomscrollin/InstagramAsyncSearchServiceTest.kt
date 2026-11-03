@@ -1,6 +1,9 @@
 package com.resolvecommunity.awaydoomscrollin
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.os.Handler
+import android.os.HandlerThread
 import android.graphics.Rect
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
@@ -30,6 +33,12 @@ class InstagramAsyncSearchServiceTest {
     class ServiceShadow : ShadowAccessibilityService() {
         val queriedOnUi = AtomicBoolean(false)
         var root: AccessibilityNodeInfo? = null
+        var dispatched = 0
+        @Implementation override fun dispatchGesture(gesture: GestureDescription,
+            callback: AccessibilityService.GestureResultCallback?, handler: Handler?): Boolean {
+            dispatched++
+            return true
+        }
         @Implementation fun getRootInActiveWindow(): AccessibilityNodeInfo? {
             if (Looper.myLooper() == Looper.getMainLooper()) queriedOnUi.set(true)
             return root
@@ -162,6 +171,77 @@ class InstagramAsyncSearchServiceTest {
             cover = InstagramGeometrySample(0, 400, 1080, 1800),
             stories = InstagramGeometrySample(0, 100, 1080, 400)))
         assertEquals(oldCover, overlay.visibleCurtain()!!.second)
+    }
+
+    private fun prepareHomeReplay(): Pair<InstagramGeometrySample, android.view.View> {
+        field("lastInstagramScreen", InstagramScreen.HOME_FEED)
+        ProtectionPreferences.setHomeStoriesSwipeLock(service, true)
+        val metrics = service.resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val stories = InstagramGeometrySample(0, 50, width, height / 3)
+        val root = AccessibilityNodeInfo().apply {
+            packageName = "com.instagram.android"
+            setBoundsInScreen(Rect(0, 0, width, height))
+        }
+        val nodes = Shadow.extract<InstagramSearchObservationTest.NodeShadow>(root).ids
+        fun node(id: String, bounds: Rect) = AccessibilityNodeInfo().apply {
+            viewIdResourceName = "com.instagram.android:id/$id"
+            isVisibleToUser = true
+            setBoundsInScreen(bounds)
+        }.also { nodes[id] = it }
+        node("feed_tab", Rect(0, height - 40, 50, height)).isSelected = true
+        node("main_feed_action_bar", Rect(0, 0, width, 50))
+        node("reels_tray_container", Rect(stories.left, stories.top, stories.right, stories.bottom))
+        node("tab_bar", Rect(0, height - 40, width, height))
+        serviceShadow.root = root
+        AntiScrollService::class.java.getDeclaredMethod("refreshHomeStoriesGuard",
+            Int::class.javaPrimitiveType, InstagramGeometrySample::class.java).apply {
+            isAccessible = true; invoke(service, 10, stories)
+        }
+        val guard = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
+            .apply { isAccessible = true }.get(overlay) as Pair<*, *>
+        return stories to (guard.first as android.view.View)
+    }
+    private fun queueHomeReplay(stories: InstagramGeometrySample) {
+        AntiScrollService::class.java.getDeclaredMethod("forwardHomeStoriesGesture",
+            InstagramHomeStoriesGesture.Forward::class.java).apply {
+            isAccessible = true
+            invoke(service, InstagramHomeStoriesGesture.Forward(50f, stories.top + 20f,
+                100f, stories.top + 20f, 150L))
+        }
+    }
+    private fun runHomeWorker() {
+        val lazyThread = AntiScrollService::class.java.getDeclaredField("searchObservationThread")
+            .apply { isAccessible = true }.get(service) as Lazy<*>
+        shadowOf((lazyThread.value as HandlerThread).looper).idle()
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+    @Test fun verifiedHomeForwardsOneCompletedGestureWithoutUiTreeQueries() {
+        val (stories, _) = prepareHomeReplay()
+        queueHomeReplay(stories)
+        runHomeWorker()
+        assertEquals(1, serviceShadow.dispatched)
+        assertFalse(serviceShadow.queriedOnUi.get())
+    }
+    @Test fun newPhysicalTouchCancelsACompletedGestureWaitingForVerification() {
+        val (stories, guard) = prepareHomeReplay()
+        queueHomeReplay(stories)
+        val down = android.view.MotionEvent.obtain(0L, 0L, android.view.MotionEvent.ACTION_DOWN,
+            70f, stories.top + 20f, 0)
+        guard.dispatchTouchEvent(down); down.recycle()
+        runHomeWorker()
+        assertEquals(0, serviceShadow.dispatched)
+    }
+    @Test fun leavingHomeOrDisablingTheOptionDropsQueuedReplay() {
+        for (disable in listOf(true, false)) {
+            val (stories, _) = prepareHomeReplay()
+            queueHomeReplay(stories)
+            if (disable) ProtectionPreferences.setHomeStoriesSwipeLock(service, false)
+            else serviceShadow.root = AccessibilityNodeInfo().apply { packageName = "example.other" }
+            runHomeWorker()
+            assertEquals(0, serviceShadow.dispatched)
+        }
     }
 
     @Test fun newNativeClickInvalidatesAQueuedSearchBack() {

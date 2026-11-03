@@ -145,4 +145,43 @@ class InstagramCurtainLifecycleTest {
         nextFrame()
         assertEquals(1, calls)
     }
+
+    @Test fun verticalSwipesInsideCoveredHomeAreConsumedAndNeverReplayed() {
+        var nativeScrolls = 0
+        overlay = InstagramFeedOverlayController(service, {}, onProfileSwipeUp = { nativeScrolls++ },
+            onEntryGuardVerticalSwipe = { _, _, _ -> nativeScrolls++ })
+        show(500)
+        val root = view("overlay")
+        for ((action, y) in listOf(android.view.MotionEvent.ACTION_DOWN to 400f,
+                android.view.MotionEvent.ACTION_MOVE to 100f, android.view.MotionEvent.ACTION_UP to 100f)) {
+            val event = android.view.MotionEvent.obtain(0, 0, action, 50f, y, 0)
+            try { assertTrue(root.dispatchTouchEvent(event)) } finally { event.recycle() }
+        }
+        assertEquals(0, nativeScrolls)
+    }
+    @Test fun storiesGuardConsumesUpwardDragAndSurvivesIdenticalGeometryUpdates() {
+        val forwarded = mutableListOf<InstagramHomeStoriesGesture.Forward>()
+        val bounds = Rect(0, 100, 1080, 400)
+        overlay.updateHomeStoriesGuard(bounds) { forwarded.add(it) }
+        val guard = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
+            .apply { isAccessible = true }.get(overlay) as Pair<*, *>
+        val view = guard.first as View
+        fun touch(action: Int, x: Float, y: Float, at: Long) =
+            android.view.MotionEvent.obtain(0L, at, action, x, y, 0).let {
+                assertTrue(view.dispatchTouchEvent(it)); it.recycle()
+            }
+        touch(android.view.MotionEvent.ACTION_DOWN, 100f, 250f, 0)
+        overlay.updateHomeStoriesGuard(bounds) { forwarded.add(it) }
+        touch(android.view.MotionEvent.ACTION_MOVE, 100f, 100f, 100)
+        touch(android.view.MotionEvent.ACTION_UP, 100f, 50f, 200)
+        assertTrue(forwarded.isEmpty())
+        touch(android.view.MotionEvent.ACTION_DOWN, 800f, 200f, 300)
+        touch(android.view.MotionEvent.ACTION_UP, 200f, 210f, 500)
+        assertEquals(1, forwarded.size)
+        assertEquals(forwarded.single().y, forwarded.single().endY)
+        overlay.hide()
+        assertNull(InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
+            .apply { isAccessible = true }.get(overlay))
+    }
+
 }

@@ -279,10 +279,12 @@ private fun telemetryRenewedConsentText(isEn: Boolean): String = if (isEn) {
 private fun accessibilityDisclosureText(isEn: Boolean): String = if (isEn) {
     "AwayDoomscrollin' needs Accessibility access to recognize the feeds and short videos you choose to protect in Instagram, TikTok and YouTube.\n\n" +
         "In those apps, it examines accessibility text and labels, view identifiers, window changes, taps and scroll events on your device. It uses this information to place curtains in Instagram and YouTube and to perform specific, rule-based Back, tap and scroll actions on protected screens.\n\n" +
+        "An optional Home Stories swipe lock blocks upward drags and replays allowed taps, horizontal swipes and refresh pulls after you lift your finger. Touch paths stay in memory on your device.\n\n" +
         "Screen text and labels, including chat and account names, are processed only on your device and are never recorded, saved or sent to a server. Messages, passwords, photos, screenshots and typed text are not included in optional usage reports. You can continue without granting access; protection will remain off."
 } else {
     "AwayDoomscrollin', Instagram, TikTok ve YouTube'da korumayı seçtiğiniz akışları ve kısa videoları tanımak için erişilebilirlik iznine ihtiyaç duyar.\n\n" +
         "Bu uygulamalarda ekrandaki erişilebilirlik metinlerini ve etiketlerini, görünüm kimliklerini, pencere değişikliklerini, dokunma ve kaydırma olaylarını cihazınızda inceler. Bu bilgileri Instagram ve YouTube'da perdeyi yerleştirmek ve korunan ekranlarda belirli kurallara göre Geri, dokunma veya kaydırma işlemleri uygulamak için kullanır.\n\n" +
+        "İsteğe bağlı Ana Sayfa hikâye kilidi yukarı sürüklemeyi engeller; izin verilen dokunma, yatay kaydırma ve yenileme hareketlerini parmağınızı kaldırınca uygular. Hareket yolları yalnızca cihaz belleğinde işlenir.\n\n" +
         "Sohbet ve hesap adları dahil ekrandaki metinler ve etiketler yalnızca cihazınızda işlenir; hiçbir zaman kaydedilmez, saklanmaz veya sunucuya gönderilmez. Mesajlar, şifreler, fotoğraflar, ekran görüntüleri ve yazdığınız metinler isteğe bağlı kullanım raporlarına eklenmez. İzin vermeden devam edebilirsiniz; koruma kapalı kalır."
 }
 
@@ -6682,7 +6684,26 @@ private fun InstagramModeSettingsCard(
     onModeChange: (ProtectionMode) -> Unit
 ) {
     val detail = ProtectionCopy.modeSummary(ProtectedApp.INSTAGRAM, mode, isEn)
-    CompactProtectionModeSettings(isEn, mode, detail, onModeChange, Color(0xFFE1306C))
+    val context = LocalContext.current
+    var swipeLock by remember { mutableStateOf(ProtectionPreferences.isHomeStoriesSwipeLockEnabled(context)) }
+    Column {
+        CompactProtectionModeSettings(isEn, mode, detail, onModeChange, Color(0xFFE1306C))
+        if (mode == ProtectionMode.BALANCED) {
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(if (isEn) "Lock Home upward swipes (experimental)" else "Ana Sayfa yukarı kaydırma kilidi (deneysel)",
+                        color = Color.White, fontSize = 13.sp)
+                    Text(if (isEn) "Allows Stories, horizontal swipes and pull-to-refresh. Allowed touches play after you lift your finger."
+                        else "Hikâyeler, yatay kaydırma ve yenileme açıktır. İzin verilen dokunuşlar parmağınızı kaldırdıktan sonra uygulanır.",
+                        color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp)
+                }
+                Switch(checked = swipeLock, onCheckedChange = {
+                    if (ProtectionPreferences.setHomeStoriesSwipeLock(context, it)) swipeLock = it
+                }, colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF00FF87),
+                    checkedTrackColor = Color(0xFF00F2FE).copy(alpha = 0.35f)))
+            }
+        }
+    }
 }
 
 @Composable

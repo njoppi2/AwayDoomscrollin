@@ -33,6 +33,10 @@ The app is in public beta. It relies on accessibility information exposed by
 other apps, so updates to those apps, Android or the phone's software can delay
 detection or cause missed or incorrect detections.
 
+## Home touch option and responsiveness
+
+Balanced Instagram can optionally lock upward drags starting in the uncovered Home Stories strip. Story taps, horizontal swipes and downward pulls for refresh are replayed after finger-up; the replay can feel slower, and its brief forwarding interval is not a guarantee against every rapid gesture. This option is off by default in release builds and on by default in the separate development test build. It does not intercept messages or recording controls, add permissions or transmit gesture data. Supported Balanced Home and Explore/search layouts use a serial background reader with bounded, conflated work; unknown or unsupported layouts retain protection and return to the existing detector.
+
 ## What it covers
 
 Instagram and YouTube have two modes. TikTok has a single protection setting.

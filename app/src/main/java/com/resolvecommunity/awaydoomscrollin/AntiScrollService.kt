@@ -28,6 +28,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
 class AntiScrollService : AccessibilityService() {
@@ -165,6 +166,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     private fun cancelSearchObservation() {
+        clearHomeStoriesGuard()
         searchObservationActive = false
         searchObservationUnknownSince = 0L
         lastSearchObservation = null
@@ -277,6 +279,8 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         traceSearchGeometry(observation.homeTab?.asRect(), observation.searchTab?.asRect(),
             observation.searchEntry?.asRect(), observation.back?.asRect(),
             observation.directTab?.asRect(), observation.stories?.asRect())
+        refreshHomeStoriesGuard(observation.windowId,
+            observation.stories.takeIf { screen == InstagramScreen.HOME_FEED })
         if (instagramOverlay.hasVisibleWindows) scheduleOverlayForegroundCheck()
         if (searchReturnVerification.needsAnotherObservation(
                 observation.surface, observation.keyboardVisible, SystemClock.uptimeMillis())) {
@@ -286,6 +290,101 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             this, "instagram.search.apply",
             "elapsedMs=${SystemClock.uptimeMillis() - started} surface=${observation.surface} " +
                 "keyboard=${observation.keyboardVisible}")
+    }
+
+    private data class HomeStoriesTarget(val windowId: Int, val bounds: InstagramGeometrySample)
+    private val homeStoriesTarget = AtomicReference<HomeStoriesTarget?>()
+    private var homeStoriesReplayPending = false
+    private val homeStoriesForwardEpoch = AtomicLong()
+
+    private fun clearHomeStoriesGuard() {
+        homeStoriesForwardEpoch.incrementAndGet()
+        homeStoriesTarget.set(null)
+        homeStoriesReplayPending = false
+        instagramOverlay.updateHomeStoriesGuard(null)
+    }
+
+    private fun refreshHomeStoriesGuard(windowId: Int, stories: InstagramGeometrySample?) {
+        val metrics = resources.displayMetrics
+        if (stories == null || stories.left < 0 || stories.right > metrics.widthPixels ||
+            stories.right <= stories.left || stories.top < 0 || stories.bottom >= metrics.heightPixels / 2 ||
+            stories.bottom - stories.top < dp(32) || lastInstagramScreen != InstagramScreen.HOME_FEED ||
+            ProtectionPreferences.getMode(this, ProtectedApp.INSTAGRAM) != ProtectionMode.BALANCED ||
+            !ProtectionPreferences.isHomeStoriesSwipeLockEnabled(this)) {
+            clearHomeStoriesGuard()
+            return
+        }
+        val candidate = HomeStoriesTarget(windowId, stories)
+        if (homeStoriesTarget.get() != candidate) {
+            homeStoriesTarget.set(candidate)
+            homeStoriesReplayPending = false
+        }
+        if (!homeStoriesReplayPending) instagramOverlay.updateHomeStoriesGuard(stories.asRect(), onBegin = {
+            // A new physical touch supersedes an older completed gesture which
+            // is still waiting for verification. Do not cancel it by injection.
+            homeStoriesForwardEpoch.incrementAndGet()
+            homeStoriesReplayPending = false
+        }, onForward = ::forwardHomeStoriesGesture)
+    }
+
+    private fun forwardHomeStoriesGesture(gesture: InstagramHomeStoriesGesture.Forward) {
+        val target = homeStoriesTarget.get() ?: return
+        if (homeStoriesReplayPending) return
+        homeStoriesReplayPending = true
+        val token = homeStoriesForwardEpoch.incrementAndGet()
+        val worker = Handler(searchObservationThread.value.looper)
+        val deadline = SystemClock.uptimeMillis() + 1_000L
+        fun current() = homeStoriesForwardEpoch.get() == token && homeStoriesTarget.get() === target && SystemClock.uptimeMillis() < deadline &&
+            ProtectionPreferences.isEnabled(this, ProtectedApp.INSTAGRAM) &&
+            ProtectionPreferences.isHomeStoriesSwipeLockEnabled(this) &&
+            ProtectionPreferences.getMode(this, ProtectedApp.INSTAGRAM) == ProtectionMode.BALANCED
+        worker.post {
+            val verified = runCatching { searchObservationReader.value.read(::current) }.getOrNull()
+            mainHandler.post ready@ {
+                if (!current()) return@ready
+                if (verified?.surface != InstagramSearchSurface.HOME || verified.windowId != target.windowId ||
+                    verified.stories != target.bounds) {
+                    clearHomeStoriesGuard()
+                    queueInstagramScan(0L)
+                    return@ready
+                }
+                val bounds = target.bounds
+                val x = gesture.x.coerceIn(bounds.left + 1f, bounds.right - 1f)
+                val endX = gesture.endX.coerceIn(bounds.left + 1f, bounds.right - 1f)
+                val y = gesture.y.coerceIn(bounds.top + 1f, bounds.bottom - 1f)
+                val endY = gesture.endY.coerceIn(y, resources.displayMetrics.heightPixels - 1f)
+                val path = Path().apply {
+                    moveTo(x, y)
+                    if (endX != x || endY != y) lineTo(endX, endY)
+                }
+                // Remove this one input window to avoid injecting into ourselves.
+                // Never replay upward movement, retry a gesture, or inject
+                // while the user's original touch stream is still in progress.
+                instagramOverlay.updateHomeStoriesGuard(null)
+                fun finished() {
+                    if (homeStoriesTarget.get() !== target || homeStoriesForwardEpoch.get() != token) return
+                    homeStoriesReplayPending = false
+                    // A tap may have opened a Story. Only fresh classification
+                    // can re-arm the Home guard, never the completion callback.
+                    homeStoriesTarget.set(null)
+                    requestSearchObservation(invalidate = true)
+                }
+                val description = GestureDescription.Builder().addStroke(
+                    GestureDescription.StrokeDescription(path, 0L, gesture.durationMs)).build()
+                val accepted = runCatching { dispatchGesture(description, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription) = finished()
+                    override fun onCancelled(gestureDescription: GestureDescription) = finished()
+                }, mainHandler) }.getOrDefault(false)
+                if (!accepted) finished()
+                ProtectionFlightRecorder.record(this, "instagram.home.stories-forward", "accepted=$accepted horizontal=${endX != x} refresh=${endY > y}")
+            }
+        }
+        mainHandler.postDelayed({
+            if (homeStoriesTarget.get() === target && homeStoriesForwardEpoch.get() == token && homeStoriesReplayPending) {
+                clearHomeStoriesGuard()
+                requestSearchObservation(invalidate = true)
+            }
+        }, 1_850L)
     }
 
     private fun InstagramGeometrySample.asRect() = Rect(left, top, right, bottom)
@@ -1383,6 +1482,11 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             // No node/source lookup here: measure delivery before foreground IPC.
             Log.d(TAG, "IG_PROFILE_RETURN_EVENT type=${event.eventType} window=${event.windowId} " +
                 "eventAt=${event.eventTime} receivedAt=${SystemClock.uptimeMillis()}")
+        }
+        if (reportedPackage == INSTAGRAM_PACKAGE && lastInstagramScreen == InstagramScreen.HOME_FEED &&
+            event.eventType in setOf(AccessibilityEvent.TYPE_VIEW_CLICKED,
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
+            clearHomeStoriesGuard()
         }
         if (reportedPackage == INSTAGRAM_PACKAGE && searchBackPending &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
@@ -8572,6 +8676,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
     }
 
     private fun onInstagramProtectedNavigation(tab: InstagramTab) {
+        clearHomeStoriesGuard()
         searchBackEpoch.incrementAndGet()
         searchBackPending = false
         searchReturnVerification.clear()
@@ -9133,6 +9238,11 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
             // the feed for a measurement frame.
             ?: findAttachedHomeStoriesBounds(root, displayBounds)
         }
+        if (lastInstagramScreen == InstagramScreen.HOME_FEED) {
+            refreshHomeStoriesGuard(root.windowId, stories?.toInstagramGeometrySample())
+            if (ProtectionFlightRecorder.ENABLED && stories != null) ProtectionFlightRecorder.record(
+                this, "instagram.home.geometry", "stories=${stories.left},${stories.top},${stories.right},${stories.bottom}")
+        }
         val bounds = contentBounds(root, displayBounds, stories?.bottom, home = true)
         if (SystemClock.uptimeMillis() < scrollCoverUntil && instagramOverlay.visibleHomeBounds() != null) {
             scrollCoverTop?.let { bounds.top = minOf(bounds.top, it) }
@@ -9544,6 +9654,7 @@ private const val YOUTUBE_BARS_RESTORE_INTERVAL_MS = 700L
         screen: InstagramScreen,
         windowId: Int
     ): InstagramProtectionDecision {
+        if (screen != InstagramScreen.HOME_FEED && screen != InstagramScreen.UNKNOWN) clearHomeStoriesGuard()
         val previous = instagramStateMachine.currentScreen
         if (screen == InstagramScreen.SAVED_COLLECTION &&
             (previous == InstagramScreen.EXPLORE || previous == InstagramScreen.HOME_FEED)) {

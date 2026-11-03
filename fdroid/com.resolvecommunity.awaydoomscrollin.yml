@@ -14,6 +14,8 @@ AntiFeatures:
       active server snapshot expires within 90 days, and encrypted local operational
       backups use a separate 14-day rotation. Screen text and titles, including chat
       and account names, are excluded from development diagnostics and network payloads.
+      The optional Home Stories upward-swipe lock processes permitted gestures locally
+      in memory and does not retain or upload touch paths.
 Categories:
   - System
 License: GPL-3.0-only

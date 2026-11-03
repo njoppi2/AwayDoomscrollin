@@ -1,0 +1,3 @@
+<resources>
+    <bool name="default_home_stories_swipe_lock">false</bool>
+</resources>

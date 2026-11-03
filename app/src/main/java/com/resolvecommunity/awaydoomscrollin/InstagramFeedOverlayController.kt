@@ -1,6 +1,7 @@
 package com.resolvecommunity.awaydoomscrollin
 
 import android.accessibilityservice.AccessibilityService
+import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -284,6 +285,44 @@ internal class InstagramFeedOverlayController(
             try { windowManager?.removeViewImmediate(view) } catch (_: Exception) {}
             Log.w(TAG, "Notification window update failed: $title", e)
             null
+        }
+    }
+
+    private var homeStoriesWindow: Pair<View, Rect>? = null
+    private var homeStoriesGesture: InstagramHomeStoriesGesture? = null
+
+    // This transparent input filter is excluded from accessibility navigation;
+    // a permitted physical tap is replayed to the native Story underneath it.
+    @SuppressLint("ClickableViewAccessibility")
+    internal fun updateHomeStoriesGuard(bounds: Rect?, onBegin: () -> Unit = {}, onForward: (InstagramHomeStoriesGesture.Forward) -> Unit = {}) {
+        val previous = homeStoriesWindow
+        if (previous?.second != bounds) homeStoriesGesture?.cancel()
+        homeStoriesWindow = updateNotificationWindow(previous, bounds, "Home Stories swipe lock",
+            replaceTouchListener = false)
+        val window = homeStoriesWindow ?: run { homeStoriesGesture = null; return }
+        if (previous?.first === window.first) return
+        val gesture = InstagramHomeStoriesGesture(12 * service.resources.displayMetrics.density)
+        homeStoriesGesture = gesture
+        window.first.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    onBegin()
+                    gesture.begin(event.rawX, event.rawY, event.eventTime)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount > 1) gesture.cancel()
+                    else gesture.move(event.rawX, event.rawY)
+                }
+                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> gesture.cancel()
+                MotionEvent.ACTION_UP -> {
+                    if (event.pointerCount == 1) {
+                        val forward = gesture.finish(event.rawX, event.rawY, event.eventTime)
+                        if (forward != null) onForward(forward)
+                        else ProtectionFlightRecorder.record(service, "instagram.home.stories-consume", "forwarded=false")
+                    } else gesture.cancel()
+                }
+            }
+            true
         }
     }
 
@@ -657,7 +696,7 @@ internal class InstagramFeedOverlayController(
             searchReturnWindow?.first?.visibility == View.VISIBLE ||
             reelsTabGuardWindow?.first?.visibility == View.VISIBLE ||
             reelsSlipCover?.first?.visibility == View.VISIBLE ||
-            strictProfilePieceWindows.isNotEmpty()
+            strictProfilePieceWindows.isNotEmpty() || homeStoriesWindow != null
 
     /**
      * Pre-arms the DM message viewport while Instagram replaces the inbox with
@@ -941,6 +980,7 @@ internal class InstagramFeedOverlayController(
     }
 
     fun hide() {
+        updateHomeStoriesGuard(null)
         if (service.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
             overlay != null) {
             // Record only code locations, never account names or screen text. This
@@ -1067,6 +1107,7 @@ internal class InstagramFeedOverlayController(
     }
 
     private fun removeGuardWindows() {
+        updateHomeStoriesGuard(null)
         updateAccountSearchGuard(null, { _, _ -> }, {})
         updateProfileIngressGuard(null)
         updateStoryEntryGuards(emptyList())
