@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.graphics.Rect
 import android.os.Looper
+import android.view.accessibility.AccessibilityRecord
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.concurrent.atomic.AtomicBoolean
@@ -26,7 +27,7 @@ import org.robolectric.shadows.ShadowAccessibilityService
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], shadows = [InstagramAsyncSearchServiceTest.ServiceShadow::class,
-    InstagramSearchObservationTest.NodeShadow::class])
+    InstagramSearchObservationTest.NodeShadow::class, InstagramAsyncSearchServiceTest.RecordShadow::class])
 @LooperMode(LooperMode.Mode.PAUSED)
 class InstagramAsyncSearchServiceTest {
     @Implements(AccessibilityService::class)
@@ -45,11 +46,26 @@ class InstagramAsyncSearchServiceTest {
         }
     }
 
+    @Implements(AccessibilityRecord::class)
+    class RecordShadow : org.robolectric.shadows.ShadowAccessibilityRecord() {
+        companion object {
+            var source: AccessibilityNodeInfo? = null
+            val queriedOnUi = AtomicBoolean(false)
+        }
+        @Implementation override fun getWindowId(): Int = 10
+        @Implementation override fun getSource(): AccessibilityNodeInfo? {
+            if (Looper.myLooper() == Looper.getMainLooper()) queriedOnUi.set(true)
+            return source
+        }
+    }
+
     private lateinit var service: AntiScrollService
     private lateinit var overlay: InstagramFeedOverlayController
     private lateinit var serviceShadow: ServiceShadow
 
     @Before fun prepare() {
+        RecordShadow.source = null
+        RecordShadow.queriedOnUi.set(false)
         service = Robolectric.buildService(AntiScrollService::class.java).create().get()
         AccessibilityConsent.accept(service)
         serviceShadow = Shadow.extract(service)
@@ -301,6 +317,47 @@ class InstagramAsyncSearchServiceTest {
         val window = InstagramFeedOverlayController::class.java.getDeclaredField("homeStoriesWindow")
             .apply { isAccessible = true }.get(overlay) as Pair<*, *>
         assertSame(guard, window.first)
+    }
+
+    @Test fun committedMessagesHandoffParksOnlyTheContentCoverWithoutUiQueries() {
+        overlay.updateReelsTabGuard(Rect(300, 1800, 450, 1900))
+        apply(InstagramSearchObservation(InstagramSearchSurface.INBOX_TRANSITION, 10, "com.instagram.android"))
+        assertNull(overlay.visibleCurtain())
+        assertTrue(overlay.hasVisibleWindows) // The protected Reels tab is retained.
+        assertFalse(serviceShadow.queriedOnUi.get())
+    }
+
+    @Test fun messagesClickDefersSourceRetrievalToTheReaderThread() {
+        apply(InstagramSearchObservation(InstagramSearchSurface.EXPLORE, 10, "com.instagram.android",
+            cover = InstagramGeometrySample(0, 200, 1080, 1800),
+            directTab = InstagramGeometrySample(400, 1800, 600, 1900)))
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED).apply {
+            packageName = "com.instagram.android"
+            eventTime = android.os.SystemClock.uptimeMillis()
+        })
+        assertFalse(RecordShadow.queriedOnUi.get())
+        assertFalse(serviceShadow.queriedOnUi.get())
+    }
+    @Test fun aWindowEventRetainsTheOneTapHintUntilItExpires() {
+        apply(InstagramSearchObservation(InstagramSearchSurface.EXPLORE, 10, "com.instagram.android",
+            cover = InstagramGeometrySample(0, 200, 1080, 1800),
+            directTab = InstagramGeometrySample(400, 1800, 600, 1900)))
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED).apply {
+            packageName = "com.instagram.android"
+            eventTime = android.os.SystemClock.uptimeMillis()
+        })
+        val slot = AntiScrollService::class.java.getDeclaredField("pendingDirectTap").apply { isAccessible = true }
+            .get(service) as java.util.concurrent.atomic.AtomicReference<*>
+        val hint = slot.get()
+        assertNotNull(hint)
+        service.onAccessibilityEvent(AccessibilityEvent(AccessibilityEvent.TYPE_WINDOWS_CHANGED).apply {
+            packageName = "com.instagram.android"
+        })
+        assertSame(hint, slot.get())
+        assertFalse(RecordShadow.queriedOnUi.get())
+        // This request is bounded even if Instagram publishes no further events.
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(501))
+        assertNull(slot.get())
     }
 
 }

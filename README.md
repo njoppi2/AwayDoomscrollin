@@ -37,6 +37,8 @@ detection or cause missed or incorrect detections.
 
 Balanced Instagram can optionally block vertical drags in both directions in the uncovered Home area below the fixed toolbar. Pull-to-refresh is also blocked. Story taps and horizontal swipes are replayed after finger-up; replay can feel slower, and its brief forwarding interval is not a guarantee against every rapid gesture. This option is off by default in both release and development test builds, keeping native Home touch controls unless explicitly enabled. It does not intercept messages or recording controls, add permissions or transmit gesture data. Supported Balanced Home and Explore/search layouts use a serial background reader with bounded, conflated work; unknown or unsupported layouts retain protection and return to the existing detector.
 
+Messages handoff: on supported Home/Explore layouts, a fresh tap on the known Messages tab can retire the outgoing cover once native Messages selection is confirmed. It does not wait for the whole inbox list to finish laying out. Failed taps, stale windows and active viewer/back-stack evidence keep the normal checks. This shortcut still needs a real-device timing check in the current candidate build.
+
 ## What it covers
 
 Instagram and YouTube have two modes. TikTok has a single protection setting.

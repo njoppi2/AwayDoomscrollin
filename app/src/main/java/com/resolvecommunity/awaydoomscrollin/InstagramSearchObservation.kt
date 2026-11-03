@@ -5,7 +5,15 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import java.util.concurrent.CancellationException
 
-internal enum class InstagramSearchSurface { HOME, INBOX, EXPLORE, SEARCH, OTHER, UNKNOWN, DEPARTED, FOREGROUND }
+internal enum class InstagramSearchSurface { HOME, INBOX, INBOX_TRANSITION, EXPLORE, SEARCH, OTHER, UNKNOWN, DEPARTED, FOREGROUND }
+
+/** A copied event's source is fetched on the reader thread, never on the UI thread. */
+internal data class InstagramDirectTap(
+    val windowId: Int,
+    val tab: InstagramGeometrySample,
+    val eventTime: Long,
+    val source: () -> AccessibilityNodeInfo?
+)
 
 /** Values only: no accessibility nodes, Views, labels or editable text cross threads. */
 internal data class InstagramSearchObservation(
@@ -31,7 +39,8 @@ internal class InstagramSearchObservationReader(
     private val root: () -> AccessibilityNodeInfo?,
     private val windows: () -> List<AccessibilityWindowInfo>,
     private val fallbackWindow: InstagramGeometrySample,
-    private val density: Float
+    private val density: Float,
+    private val now: () -> Long = { android.os.SystemClock.uptimeMillis() }
 ) {
     companion object { private const val PACKAGE = "com.instagram.android" }
 
@@ -43,14 +52,15 @@ internal class InstagramSearchObservationReader(
             current.windowId, pkg)
     }
 
-    fun read(isCurrent: () -> Boolean = { true }): InstagramSearchObservation {
+    fun read(isCurrent: () -> Boolean = { true }, directTap: InstagramDirectTap? = null): InstagramSearchObservation {
         fun checkCurrent() { if (!isCurrent()) throw CancellationException("Superseded search read") }
         checkCurrent()
-        val observation = readCurrentRoot(::checkCurrent)
+        val observation = readCurrentRoot(::checkCurrent, directTap)
         checkCurrent()
         if (observation.surface == InstagramSearchSurface.EXPLORE ||
             observation.surface == InstagramSearchSurface.SEARCH ||
-            observation.surface == InstagramSearchSurface.HOME || observation.surface == InstagramSearchSurface.INBOX) {
+            observation.surface == InstagramSearchSurface.HOME || observation.surface == InstagramSearchSurface.INBOX ||
+            observation.surface == InstagramSearchSurface.INBOX_TRANSITION) {
             val current = checkForeground()
             if (current.surface == InstagramSearchSurface.DEPARTED) return current
             if (current.surface == InstagramSearchSurface.UNKNOWN ||
@@ -61,7 +71,7 @@ internal class InstagramSearchObservationReader(
         return observation
     }
 
-    private fun readCurrentRoot(checkCurrent: () -> Unit): InstagramSearchObservation {
+    private fun readCurrentRoot(checkCurrent: () -> Unit, directTap: InstagramDirectTap?): InstagramSearchObservation {
         val current = root() ?: return InstagramSearchObservation(InstagramSearchSurface.UNKNOWN)
         val pkg = current.packageName?.toString()
         if (pkg != PACKAGE) return InstagramSearchObservation(
@@ -95,6 +105,37 @@ internal class InstagramSearchObservationReader(
                 searchTab = if (surface in setOf(InstagramSearchSurface.EXPLORE, InstagramSearchSurface.HOME, InstagramSearchSurface.INBOX)) bounds("search_tab") else null,
                 searchEntry = entry, keyboardVisible = keyboard, stories = stories, inbox = inbox,
                 directTab = bounds("direct_tab"), homeTouchBand = band)
+
+        // A real, fresh Messages-tab click plus committed native selection is
+        // enough to retire the outgoing feed cover. Do not wait for the inbox
+        // list and every retained media node to finish laying out. A tap alone
+        // never releases the cover, and ordinary typing/row clicks do not qualify.
+        if (directTap != null && directTap.windowId == windowId &&
+            now() - directTap.eventTime in 0L..500L) {
+            checkCurrent()
+            var source = directTap.source()
+            val sourceBounds = source?.let { Rect().also(it::getBoundsInScreen) }
+            val inTab = sourceBounds != null && !sourceBounds.isEmpty &&
+                directTap.tab.rect().contains(sourceBounds.centerX(), sourceBounds.centerY()) &&
+                sourceBounds.width() <= directTap.tab.right - directTap.tab.left &&
+                sourceBounds.height() <= directTap.tab.bottom - directTap.tab.top
+            var matched = false
+            if (inTab) repeat(3) {
+                checkCurrent()
+                val node = source
+                if (!matched && node != null && node.packageName?.toString() == PACKAGE &&
+                    node.windowId == windowId && node.isVisibleToUser) {
+                    val id = node.viewIdResourceName?.substringAfter(":id/")
+                    matched = id == "direct_tab" || id == "direct_tab_icon_view"
+                    if (!matched) source = node.parent
+                }
+            }
+            if (matched && selected("direct_tab") && visible("action_bar_button_back") == null &&
+                listOf("root_clips_layout", "reel_viewer_root", "story_viewer_container")
+                    .none { visible(it) != null } && now() - directTap.eventTime in 0L..500L) {
+                return InstagramSearchObservation(InstagramSearchSurface.INBOX_TRANSITION, windowId, pkg)
+            }
+        }
 
         // A positive input-focus proof is independent of stale mounted feed IDs.
         checkCurrent()

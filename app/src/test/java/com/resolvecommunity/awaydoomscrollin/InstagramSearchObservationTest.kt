@@ -255,4 +255,76 @@ class InstagramSearchObservationTest {
         assertEquals(InstagramGeometrySample(0, 400, 1080, 640), observation.stories)
     }
 
+    private val directBounds = InstagramGeometrySample(400, 1800, 600, 1900)
+    private fun directTap(source: AccessibilityNodeInfo, windowId: Int = 10,
+        eventTime: Long = android.os.SystemClock.uptimeMillis()) =
+        InstagramDirectTap(windowId, directBounds, eventTime) { source }
+    private fun directSource() = node("direct_tab_icon_view", Rect(430, 1820, 570, 1880))
+    private fun selectedMessagesTab() = add("direct_tab", Rect(400, 1800, 600, 1900)).apply { isSelected = true }
+
+    @Test fun committedMessagesTapDoesNotWaitForInboxBodyOrBroadViewerScan() {
+        selectedMessagesTab()
+        val result = reader.read(directTap = directTap(directSource()))
+        assertEquals(InstagramSearchSurface.INBOX_TRANSITION, result.surface)
+        assertNull(result.cover)
+        assertFalse(state.queries.contains("inbox_refreshable_thread_list_recyclerview"))
+        assertFalse(state.queries.contains("profile_header_container"))
+        assertFalse(state.queries.contains("action_bar_search_edit_text"))
+    }
+    @Test fun aTapWithoutNativeMessagesCommitmentDoesNotReleaseHome() {
+        home(); selectedMessagesTab().isSelected = false
+        assertEquals(InstagramSearchSurface.HOME, reader.read(directTap = directTap(directSource())).surface)
+    }
+    @Test fun unrelatedAndOversizedClickSourcesDoNotGetTheMessagesShortcut() {
+        selectedMessagesTab()
+        for (source in listOf(node("media_container", Rect(430, 1820, 570, 1880)),
+                node("direct_tab", Rect(0, 0, 1080, 1920)),
+                node("direct_tab", Rect(100, 100, 300, 180)))) {
+            assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = directTap(source)).surface)
+        }
+    }
+    @Test fun hiddenForeignAndWrongWindowSourcesCannotReleaseTheCover() {
+        selectedMessagesTab()
+        val source = directSource()
+        source.isVisibleToUser = false
+        assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = directTap(source)).surface)
+        source.isVisibleToUser = true; source.packageName = "example.other"
+        assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = directTap(source)).surface)
+        source.packageName = "com.instagram.android"; Shadow.extract<NodeShadow>(source).window = 11
+        assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = directTap(source)).surface)
+    }
+    @Test fun staleOrWrongWindowTapDoesNotEvenFetchItsSource() {
+        selectedMessagesTab()
+        var sourceReads = 0
+        val clocked = InstagramSearchObservationReader({ root }, { emptyList() },
+            InstagramGeometrySample(0, 0, 1080, 1920), 1f, now = { 1_000L })
+        for (hint in listOf(InstagramDirectTap(10, directBounds, 400L) { sourceReads++; directSource() },
+                InstagramDirectTap(11, directBounds, 1_000L) { sourceReads++; directSource() })) {
+            assertNotEquals(InstagramSearchSurface.INBOX_TRANSITION, clocked.read(directTap = hint).surface)
+        }
+        assertEquals(0, sourceReads)
+    }
+    @Test fun aBackStackOrVisibleViewerPreventsTheEarlyHandoff() {
+        for (id in listOf("action_bar_button_back", "root_clips_layout", "reel_viewer_root", "story_viewer_container")) {
+            state.ids.clear(); selectedMessagesTab(); add(id)
+            assertNotEquals(id, InstagramSearchSurface.INBOX_TRANSITION, reader.read(directTap = directTap(directSource())).surface)
+        }
+    }
+    @Test fun leavingInstagramDuringTapVerificationCannotPublishAHandoff() {
+        selectedMessagesTab()
+        val other = node("other", Rect(0, 0, 1080, 1920)).apply { packageName = "example.other" }
+        var reads = 0
+        val changing = InstagramSearchObservationReader({ if (reads++ == 0) root else other },
+            { emptyList() }, InstagramGeometrySample(0, 0, 1080, 1920), 1f)
+        assertEquals(InstagramSearchSurface.DEPARTED, changing.read(directTap = directTap(directSource())).surface)
+    }
+    @Test fun messagesTapHintDoesNotReadOrRetainPrivateLabels() {
+        selectedMessagesTab()
+        val source = directSource().apply {
+            text = "SYNTHETIC_PRIVATE_MESSAGE"
+            contentDescription = "SYNTHETIC_PRIVATE_ACCOUNT"
+        }
+        assertFalse(reader.read(directTap = directTap(source)).toString().contains("SYNTHETIC_PRIVATE"))
+    }
+
 }

@@ -16,6 +16,8 @@ AwayDoomscrollin' utilizes the Android Accessibility Service API exclusively to 
 
 The optional Home Stories vertical-swipe lock covers the uncovered area below the toolbar. It blocks upward and downward drags, including refresh. It processes completed touch coordinates and durations only in memory to replay permitted taps and horizontal swipes. It does not retain or upload these touch paths. It is off by default in both release and development test builds; native Home touches remain unchanged unless the option is enabled.
 
+The Messages shortcut accepts only recent clicks and keeps one temporary click-event hint in memory across related window updates. Worker copies are released after processing; the retained hint expires after 500 ms or is cleared on cancellation. Screen text and labels from these events are not logged or uploaded. No additional telemetry fields or network destinations are introduced.
+
 ## 3. Data Collection and Telemetry
 Screen analysis and blocking run locally on the device. The Android manifest declares `android.permission.INTERNET` only for the optional telemetry path disclosed below; the app is therefore offline-first, not a zero-network-permission app.
 
